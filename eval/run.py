@@ -138,7 +138,7 @@ async def main() -> int:
         def capture() -> bytes:
             params = {'format': 'png'} if findings else {'format': 'jpeg', 'quality': 70}
             import base64
-            return base64.b64decode(bh.cdp('Page.captureScreenshot', **params)['data'])
+            return base64.b64decode(bh.cdp('Page.captureScreenshot', _response_timeout=15, **params)['data'])
 
         async def after_tool(name: str, args: dict, r: dict) -> None:
             for m in session.messages[seen_responses[0]:]:

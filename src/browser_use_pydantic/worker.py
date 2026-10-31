@@ -45,6 +45,8 @@ def _install(ns: dict) -> None:
     raw_cdp = helpers.cdp
 
     def cdp(method, session_id=None, **params):
+        if method == 'Page.captureScreenshot':  # cloud captures routinely exceed the 5s IPC default
+            params.setdefault('_response_timeout', helpers.SCREENSHOT_IPC_RESPONSE_TIMEOUT_SECONDS)
         result = raw_cdp(method, session_id, **params)
         # Every screenshot the agent takes is shown to the model as a native image.
         if method == 'Page.captureScreenshot' and isinstance(result, dict) and result.get('data'):

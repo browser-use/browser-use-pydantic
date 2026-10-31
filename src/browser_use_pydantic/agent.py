@@ -15,7 +15,7 @@ import socket
 import sys
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -161,7 +161,10 @@ class BrowserLoop(AbstractCapability[Session]):
     async def before_model_request(self, ctx: RunContext[Session], request_context: ModelRequestContext):
         s = ctx.deps
         s.messages = ctx.messages
-        _prune_images(ctx.messages)
+        pruned = _prune_images(ctx.messages)
+        if pruned is not None:  # same pattern as ProcessHistory: new objects, persisted
+            ctx.messages[:] = pruned
+            request_context.messages = pruned.copy()
         if not s.finalizing and (
             ctx.run_step >= s.max_steps - 1 or time.monotonic() - s.started >= 0.9 * s.timeout_s
         ):
@@ -174,18 +177,27 @@ class BrowserLoop(AbstractCapability[Session]):
         return lambda ctx: {'tool_choice': ['finish_from_repl', 'finish']} if ctx.deps.finalizing else {}
 
 
-def _prune_images(messages: list[ModelMessage]) -> None:
-    seen = 0
-    for m in reversed(messages):
+def _is_image(c: Any) -> bool:
+    return isinstance(c, BinaryContent) and c.is_image
+
+
+def _prune_images(messages: list[ModelMessage]) -> list[ModelMessage] | None:
+    """Keep images only in the last KEEP_IMAGE_RESULTS tool results. Returns None when nothing changes."""
+    out, seen, changed = list(messages), 0, False
+    for i in range(len(out) - 1, -1, -1):
+        m = out[i]
         if not isinstance(m, ModelRequest):
             continue
-        for part in m.parts:
-            if isinstance(part, ToolReturnPart) and isinstance(part.content, list):
-                if any(isinstance(c, BinaryContent) and c.is_image for c in part.content):
-                    seen += 1
-                    if seen > KEEP_IMAGE_RESULTS:
-                        part.content = [c if not (isinstance(c, BinaryContent) and c.is_image)
-                                        else '[older screenshot removed]' for c in part.content]
+        parts = list(m.parts)
+        for j, part in enumerate(parts):
+            if isinstance(part, ToolReturnPart) and isinstance(part.content, list) and any(map(_is_image, part.content)):
+                seen += 1
+                if seen > KEEP_IMAGE_RESULTS:
+                    content = [('[older screenshot removed]' if _is_image(c) else c) for c in part.content]
+                    parts[j] = replace(part, content=content)
+                    out[i] = m = replace(m, parts=parts)
+                    changed = True
+    return out if changed else None
 
 
 def build_agent(

@@ -112,3 +112,14 @@ async def test_timeout_returns_partial(browser, tmp_path):
     ], timeout_s=4, cell_timeout_s=60)
     assert result.status == 'timeout'
     assert json.loads(result.text) == {'rows': 3}
+
+
+async def test_only_last_two_screenshot_results_keep_images(browser, tmp_path):
+    shot = ('python', {'code': "new_tab('data:text/html,<h1>x</h1>') if not list_tabs(False) else None\nscreenshot()\n'shot'"})
+    result, seen = await go(browser, tmp_path, [shot, shot, shot, ('finish', {'result': 'ok'})])
+    assert result.output == 'ok'
+    returns = [p for m in result.messages for p in getattr(m, 'parts', []) if isinstance(p, ToolReturnPart)
+               and p.tool_name == 'python']
+    images = [sum(getattr(c, 'is_image', False) for c in p.content) for p in returns]
+    assert images == [0, 1, 1]
+    assert '[older screenshot removed]' in returns[0].content
