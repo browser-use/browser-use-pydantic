@@ -1,0 +1,36 @@
+[project]
+name = "browser-use-pydantic"
+version = "0.1.0"
+description = "Add your description here"
+authors = [
+    { name = "Gregor Žunič", email = "36313686+gregpr07@users.noreply.github.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "browser-harness",
+    "pydantic-ai-slim[openai]>=2.64.0",
+]
+
+[project.optional-dependencies]
+eval = [
+    "lmnr>=0.8.6",
+    "openpyxl==3.1.5",
+    "pypdf==6.14.2",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv.sources]
+browser-harness = { git = "https://github.com/browser-use/browser-harness", rev = "0727ae7" }
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+    "pytest-asyncio>=1.4.1",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"

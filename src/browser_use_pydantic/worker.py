@@ -1,0 +1,168 @@
+"""Persistent Python REPL for one agent. Runs as a child process so a hung cell can be killed.
+
+Namespace = browser-harness helpers + screenshot/show_image/checkpoint. Protocol: one JSON line
+per message over the socket fd passed in argv[1]. Cell stdout/stderr (including subprocesses)
+go to a per-cell file, so a killed cell still leaves its partial output on disk.
+"""
+
+import ast
+import asyncio
+import base64
+import inspect
+import io
+import json
+import os
+import pprint
+import socket
+import sys
+import traceback
+from pathlib import Path
+
+MAX_IMAGES_PER_CELL = 4
+STATE = Path(os.environ.get('BU_STATE_DIR', '.browser-use'))
+images: list[dict] = []
+
+
+def _add_image(data: bytes, media_type: str = 'image/png') -> bool:
+    if len(images) >= MAX_IMAGES_PER_CELL:
+        print(f'[image dropped: {MAX_IMAGES_PER_CELL} per call max]')
+        return False
+    if len(data) > 5_000_000:  # keep provider payloads bounded
+        from PIL import Image
+
+        img = Image.open(io.BytesIO(data)).convert('RGB')
+        img.thumbnail((1600, 1600))
+        out = io.BytesIO()
+        img.save(out, 'JPEG', quality=80)
+        data, media_type = out.getvalue(), 'image/jpeg'
+    images.append({'data': base64.b64encode(data).decode(), 'media_type': media_type})
+    return True
+
+
+def _install(ns: dict) -> None:
+    from browser_harness import helpers
+
+    raw_cdp = helpers.cdp
+
+    def cdp(method, session_id=None, **params):
+        result = raw_cdp(method, session_id, **params)
+        # Every screenshot the agent takes is shown to the model as a native image.
+        if method == 'Page.captureScreenshot' and isinstance(result, dict) and result.get('data'):
+            fmt = params.get('format', 'png')
+            _add_image(base64.b64decode(result['data']), f'image/{"jpeg" if fmt == "jpeg" else fmt}')
+        return result
+
+    cdp.__doc__ = raw_cdp.__doc__
+    helpers.cdp = cdp  # capture_screenshot() and friends go through the wrapper too
+    exec('from browser_harness.helpers import *', ns)
+    ns['cdp'] = cdp
+
+    shots = STATE / 'screenshots'
+
+    def screenshot(full=False):
+        """Capture the current tab and show it to the model. Returns the PNG path."""
+        shots.mkdir(parents=True, exist_ok=True)
+        return helpers.capture_screenshot(str(shots / f'{len(list(shots.iterdir())):04d}.png'), full=full)
+
+    def show_image(path):
+        """Show an image file (png/jpeg/webp/gif) to the model."""
+        p = Path(path)
+        ext = p.suffix.lower().lstrip('.').replace('jpg', 'jpeg')
+        return _add_image(p.read_bytes(), f'image/{ext}')
+
+    def checkpoint(filename, value, partial=False):
+        """Atomically save JSON to the workspace. partial=True also makes it the run's fallback result."""
+        path = Path(filename)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + '.tmp')
+        tmp.write_text(json.dumps(value, ensure_ascii=False, indent=1, default=str))
+        os.replace(tmp, path)
+        if partial:
+            STATE.mkdir(parents=True, exist_ok=True)
+            (STATE / 'partial.json').write_text(json.dumps({'file': str(path), 'value': value}, default=str))
+        return str(path)
+
+    ns.update(screenshot=screenshot, show_image=show_image, checkpoint=checkpoint)
+
+
+def _display(value) -> None:
+    if value is None:
+        return
+    print(value if isinstance(value, str) else pprint.pformat(value, width=120, sort_dicts=False))
+
+
+def _compile(code: str, n: int):
+    flags = ast.PyCF_ALLOW_TOP_LEVEL_AWAIT
+    tree = compile(code, f'<cell {n}>', 'exec', flags=ast.PyCF_ONLY_AST | flags)
+    if tree.body and isinstance(tree.body[-1], ast.Expr):  # REPL-style: show the last expression
+        last = tree.body[-1]
+        call = ast.copy_location(ast.Call(ast.Name('__bu_display', ast.Load()), [last.value], []), last.value)
+        tree.body[-1] = ast.copy_location(ast.Expr(call), last)
+        ast.fix_missing_locations(tree)
+    return compile(tree, f'<cell {n}>', 'exec', flags=flags)
+
+
+def _run(code_obj, ns, loop):
+    if code_obj.co_flags & inspect.CO_COROUTINE:
+        return loop.run_until_complete(eval(code_obj, ns))
+    return exec(code_obj, ns)
+
+
+def _error(e: BaseException) -> str:
+    lines = traceback.format_exception(e)
+    # Drop worker frames; keep the user's cell frames and the exception itself.
+    keep = [lines[0]] + [l for l in lines[1:] if not l.lstrip().startswith('File "' + __file__)]
+    return ''.join(keep).strip()
+
+
+def main() -> None:
+    sock = socket.socket(fileno=int(sys.argv[1]))
+    rfile, wfile = sock.makefile('rb'), sock.makefile('wb')
+    cells = STATE / 'cells'
+    cells.mkdir(parents=True, exist_ok=True)
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+    ns: dict = {'__name__': '__main__', '__bu_display': _display}
+    _install(ns)
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    def send(msg):
+        wfile.write(json.dumps(msg).encode() + b'\n')
+        wfile.flush()
+
+    send({'type': 'ready'})
+    for line in rfile:
+        msg = json.loads(line)
+        images.clear()
+        out_path = cells / f'{msg["n"]:04d}.txt'
+        error = value = None
+        with open(out_path, 'wb') as out:
+            saved = os.dup(1), os.dup(2)
+            os.dup2(out.fileno(), 1)
+            os.dup2(out.fileno(), 2)
+            try:
+                if msg['op'] == 'exec':
+                    _run(_compile(msg['code'], msg['n']), ns, loop)
+                else:  # 'eval': read an existing value for delivery
+                    obj = compile(msg['code'], '<finish>', 'eval', flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT)
+                    value = _run(obj, ns, loop) if obj.co_flags & inspect.CO_COROUTINE else eval(obj, ns)
+                    value = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
+            except BaseException as e:  # noqa: BLE001 - the agent sees every failure
+                if isinstance(e, (SystemExit, KeyboardInterrupt)):
+                    error = f'{type(e).__name__} ignored; the REPL keeps running.'
+                else:
+                    error = _error(e)
+            finally:
+                sys.stdout.flush()
+                sys.stderr.flush()
+                os.dup2(saved[0], 1)
+                os.dup2(saved[1], 2)
+                os.close(saved[0])
+                os.close(saved[1])
+        send({'type': 'result', 'output': out_path.read_text(errors='replace'), 'error': error,
+              'value': value, 'images': list(images), 'output_file': str(out_path)})
+
+
+if __name__ == '__main__':
+    main()

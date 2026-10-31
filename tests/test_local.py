@@ -1,0 +1,114 @@
+"""End-to-end against a real isolated headless Chrome, scripted model (no provider calls)."""
+
+import json
+import os
+import shutil
+import socket
+import subprocess
+import tempfile
+import time
+import urllib.request
+from pathlib import Path
+
+import pytest
+from pydantic_ai.messages import ModelResponse, ToolCallPart, ToolReturnPart
+from pydantic_ai.models.function import AgentInfo, FunctionModel
+
+from browser_use_pydantic import Repl, Session, build_agent, run
+
+CHROME = os.environ.get('CHROME', '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome')
+
+
+@pytest.fixture(scope='module')
+def browser():
+    if not Path(CHROME).exists():
+        pytest.skip('Chrome not installed')
+    with socket.socket() as s:
+        s.bind(('127.0.0.1', 0))
+        port = s.getsockname()[1]
+    profile = tempfile.mkdtemp()
+    proc = subprocess.Popen([CHROME, '--headless=new', f'--remote-debugging-port={port}', f'--user-data-dir={profile}',
+                             '--no-first-run', 'about:blank'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    for _ in range(100):
+        try:
+            ws = json.load(urllib.request.urlopen(f'http://127.0.0.1:{port}/json/version'))['webSocketDebuggerUrl']
+            break
+        except OSError:
+            time.sleep(0.1)
+    name = f'bupt{port}'
+    from browser_harness import admin
+    os.environ['BH_TAB_MARKER'] = '0'  # daemon marks titles otherwise
+    admin.ensure_daemon(name=name, env={'BU_CDP_WS': ws})
+    yield {'BU_NAME': name}
+    try:
+        from browser_harness import _ipc as ipc
+        c, token = ipc.connect(name, timeout=2)
+        ipc.request(c, token, {'meta': 'shutdown'})
+    except Exception:
+        pass
+    proc.kill()
+    shutil.rmtree(profile, ignore_errors=True)
+
+
+def script(*steps):
+    """FunctionModel that plays tool calls in order and records what it saw."""
+    seen = []
+
+    def fn(messages, info: AgentInfo):
+        seen.append(messages[-1])
+        if len(seen) > len(steps):
+            raise AssertionError(f'unexpected model call {len(seen)}; last {seen[-1]!r}'[:4000])
+        name, args = steps[len(seen) - 1]
+        return ModelResponse(parts=[ToolCallPart(name, args)])
+
+    return FunctionModel(fn), seen
+
+
+async def go(env, tmp_path, steps, **kw):
+    model, seen = script(*steps)
+    agent = build_agent()
+    session = Session(repl=Repl(tmp_path, env), **kw)
+    try:
+        with agent.override(model=model):
+            result = await run(agent, 'task', session, 'gpt-6-luna')
+    finally:
+        await session.repl.close()
+    return result, seen
+
+
+async def test_browser_screenshot_and_finish_from_repl(browser, tmp_path):
+    result, seen = await go(browser, tmp_path, [
+        ('python', {'code': "new_tab('data:text/html,<title>T</title><h1>Hello</h1>')\nwait_for_load()\n"
+                            "info = page_info()\nh = js('document.querySelector(\"h1\").textContent')\nscreenshot()\nh"}),
+        ('python', {'code': 'records = [{"h": h, "title": info["title"]}]\nawait __import__("asyncio").sleep(0)\nlen(records)'}),
+        ('finish_from_repl', {'expression': 'json.dumps(records)'}),
+    ])
+    assert result.status == 'completed', result.error
+    assert json.loads(result.output) == [{'h': 'Hello', 'title': 'T'}]
+    first = [p for p in seen[1].parts if isinstance(p, ToolReturnPart)][0]
+    assert first.content[0].strip() == 'Hello'
+    assert any(getattr(c, 'is_image', False) for c in first.content)  # native image to the model
+    assert [p for p in seen[2].parts if isinstance(p, ToolReturnPart)][0].content[0].strip() == '1'
+
+
+async def test_cell_timeout_restarts_worker_keeps_files(browser, tmp_path):
+    result, seen = await go(browser, tmp_path, [
+        ('python', {'code': "x = 1\ncheckpoint('rows.json', [1, 2], partial=True)\nprint('saved', flush=True)\nimport time\ntime.sleep(30)"}),
+        ('python', {'code': "print('x' in globals(), json.load(open('rows.json')))"}),
+        ('python', {'code': 'raise ValueError("boom")'}),
+        ('finish', {'result': 'done'}),
+    ], cell_timeout_s=3)
+    assert result.output == 'done'
+    timed_out = [p for p in seen[1].parts if isinstance(p, ToolReturnPart)][0].content[0]
+    assert 'saved' in timed_out and 'timed out' in timed_out
+    assert [p for p in seen[2].parts if isinstance(p, ToolReturnPart)][0].content[0].strip() == 'False [1, 2]'
+    assert 'ValueError: boom' in [p for p in seen[3].parts if isinstance(p, ToolReturnPart)][0].content[0]
+
+
+async def test_timeout_returns_partial(browser, tmp_path):
+    result, _ = await go(browser, tmp_path, [
+        ('python', {'code': "checkpoint('out.json', {'rows': 3}, partial=True)"}),
+        ('python', {'code': 'import time\ntime.sleep(30)'}),
+    ], timeout_s=4, cell_timeout_s=60)
+    assert result.status == 'timeout'
+    assert json.loads(result.text) == {'rows': 3}
