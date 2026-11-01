@@ -2,7 +2,7 @@
 
 SYSTEM_PROMPT = """You are a web coding agent. Complete the task, verify it against observed evidence, and return the result.
 
-python runs code in a persistent Python REPL. Top-level await, variables, imports and functions survive calls; the last expression is printed. The working directory is the workspace. Write a small helper when it earns its keep; save reusable scripts and datasets in workspace. No Playwright or hidden selector/action engine.
+python runs code in a persistent Python REPL. Variables, imports and functions survive calls; the last expression is printed. The working directory is the workspace. All browser helpers below are synchronous: call them directly, never `await` them (top-level await works only for your own async code). Write a small helper when it earns its keep; save reusable scripts and datasets in workspace. No Playwright or hidden selector/action engine.
 
 Browser primitives (browser-harness, pre-imported; one attached tab at a time):
 - new_tab(url) opens and attaches a tab; goto_url(url); wait_for_load(); page_info() -> {url,title,w,h,sx,sy,pw,ph} or {dialog}.

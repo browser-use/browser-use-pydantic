@@ -19,6 +19,8 @@ import traceback
 from pathlib import Path
 
 MAX_IMAGES_PER_CELL = 4
+MAX_IMAGE_SIDE = 2048  # full-page captures exceeded OpenAI's 30k-patch limit (bub2-002)
+CDP_TIMEOUT_S = 30.0
 STATE = Path(os.environ.get('BU_STATE_DIR', '.browser-use'))
 images: list[dict] = []
 
@@ -27,11 +29,17 @@ def _add_image(data: bytes, media_type: str = 'image/png') -> bool:
     if len(images) >= MAX_IMAGES_PER_CELL:
         print(f'[image dropped: {MAX_IMAGES_PER_CELL} per call max]')
         return False
-    if len(data) > 5_000_000:  # keep provider payloads bounded
-        from PIL import Image
+    from PIL import Image
 
-        img = Image.open(io.BytesIO(data)).convert('RGB')
-        img.thumbnail((1600, 1600))
+    try:  # providers 400 the whole request on an undecodable or oversized image
+        img = Image.open(io.BytesIO(data))
+        img.load()
+    except Exception as e:  # noqa: BLE001
+        print(f'[image dropped: not a decodable image ({type(e).__name__})]')
+        return False
+    if len(data) > 5_000_000 or max(img.size) > MAX_IMAGE_SIDE:
+        img = img.convert('RGB')
+        img.thumbnail((MAX_IMAGE_SIDE, MAX_IMAGE_SIDE))
         out = io.BytesIO()
         img.save(out, 'JPEG', quality=80)
         data, media_type = out.getvalue(), 'image/jpeg'
@@ -45,8 +53,9 @@ def _install(ns: dict) -> None:
     raw_cdp = helpers.cdp
 
     def cdp(method, session_id=None, **params):
-        if method == 'Page.captureScreenshot':  # cloud captures routinely exceed the 5s IPC default
-            params.setdefault('_response_timeout', helpers.SCREENSHOT_IPC_RESPONSE_TIMEOUT_SECONDS)
+        # browser-harness defaults to 5s IPC; heavy cloud pages (Maps, TripAdvisor) blew it on navigate/evaluate/input.
+        default = helpers.SCREENSHOT_IPC_RESPONSE_TIMEOUT_SECONDS if method == 'Page.captureScreenshot' else CDP_TIMEOUT_S
+        params.setdefault('_response_timeout', default)
         result = raw_cdp(method, session_id, **params)
         # Every screenshot the agent takes is shown to the model as a native image.
         if method == 'Page.captureScreenshot' and isinstance(result, dict) and result.get('data'):

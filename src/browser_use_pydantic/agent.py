@@ -45,6 +45,7 @@ class Repl:
         self.workspace, self.env, self.n = workspace, env or {}, 0
         self.proc: asyncio.subprocess.Process | None = None
         self.state = workspace / '.browser-use'
+        self.lock = asyncio.Lock()  # the model may emit parallel python calls; the worker runs one cell at a time
 
     async def start(self) -> None:
         self.state.mkdir(parents=True, exist_ok=True)
@@ -69,6 +70,10 @@ class Repl:
         self.proc = None
 
     async def call(self, op: str, code: str, timeout: float) -> dict[str, Any]:
+        async with self.lock:
+            return await self._call(op, code, timeout)
+
+    async def _call(self, op: str, code: str, timeout: float) -> dict[str, Any]:
         if self.proc is None or self.proc.returncode is not None:
             await self.start()
         self.n += 1
@@ -110,7 +115,7 @@ class Session:
 async def python(ctx: RunContext[Session], code: str) -> list[Any]:
     """Run Python in the persistent REPL (browser-harness helpers and raw cdp() pre-imported).
 
-    Top-level await works; variables survive calls; the last expression is printed. Cell deadline
+    Browser helpers are synchronous (do not await them); variables survive calls; the last expression is printed. Cell deadline
     applies; checkpoint small batches before it. screenshot() returns native images.
     """
     r = await ctx.deps.repl.call('exec', code, ctx.deps.cell_timeout_s)
@@ -213,7 +218,7 @@ def build_agent(
         'openai_reasoning_summary': 'auto',
         'max_tokens': 32_768,
     }
-    return Agent(
+    agent = Agent(
         model,
         deps_type=Session,
         defer_model_check=True,
@@ -224,6 +229,14 @@ def build_agent(
         retries={'tools': 1, 'output': 3},
         capabilities=[BrowserLoop(), OpenAICompaction(token_threshold=compact_at_tokens)],
     )
+
+    @agent.instructions
+    def workspace(ctx: RunContext[Session]) -> str:  # bu-pi src/agent.ts:275; V2 deliverables went outside it
+        return (f'Workspace directory (JSON string): {json.dumps(str(ctx.deps.repl.workspace.resolve()))}. The REPL '
+                'working directory starts here. Save deliverables inside this directory; files outside it are not '
+                'delivered. Use relative paths or the exact workspace value, not a guessed parent directory.')
+
+    return agent
 
 
 @dataclass

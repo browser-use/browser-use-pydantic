@@ -138,7 +138,7 @@ async def main() -> int:
         def capture() -> bytes:
             params = {'format': 'png'} if findings else {'format': 'jpeg', 'quality': 70}
             import base64
-            return base64.b64decode(bh.cdp('Page.captureScreenshot', _response_timeout=15, **params)['data'])
+            return base64.b64decode(bh.cdp('Page.captureScreenshot', _response_timeout=3.5, **params)['data'])
 
         async def after_tool(name: str, args: dict, r: dict) -> None:
             for m in session.messages[seen_responses[0]:]:
@@ -155,7 +155,7 @@ async def main() -> int:
             agent_steps.flush()
             started = time.monotonic()
             try:  # observer screenshot of the agent's attached tab, for the judge only
-                data = await asyncio.wait_for(asyncio.to_thread(capture), 15)
+                data = await asyncio.wait_for(asyncio.to_thread(capture), 3.5)  # bu-pi observerTimeoutMs
                 shot = shots_dir / f'{len(list(shots_dir.iterdir())) + 1:03d}.{"png" if findings else "jpg"}'
                 shot.write_bytes(data)
                 if findings:

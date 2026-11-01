@@ -123,3 +123,54 @@ async def test_only_last_two_screenshot_results_keep_images(browser, tmp_path):
     images = [sum(getattr(c, 'is_image', False) for c in p.content) for p in returns]
     assert images == [0, 1, 1]
     assert '[older screenshot removed]' in returns[0].content
+
+
+async def test_parallel_python_calls_are_serialized(browser, tmp_path):
+    # hard-high 0vgnxb/74rs7g/up8ijl: two python calls in one response crashed the run (readuntil race)
+    calls = [0]
+
+    def fn(messages, info: AgentInfo):
+        calls[0] += 1
+        if calls[0] == 1:
+            return ModelResponse(parts=[ToolCallPart('python', {'code': 'import time; time.sleep(0.3); a = 1'}),
+                                        ToolCallPart('python', {'code': 'b = 2'})])
+        return ModelResponse(parts=[ToolCallPart('finish_from_repl', {'expression': 'str(a + b)'})])
+
+    agent, session = build_agent(), Session(repl=Repl(tmp_path, browser))
+    try:
+        with agent.override(model=FunctionModel(fn)):
+            result = await run(agent, 'task', session, 'gpt-6-luna')
+    finally:
+        await session.repl.close()
+    assert (result.status, result.output, result.error) == ('completed', '3', None)
+
+
+async def test_oversized_and_invalid_images_never_reach_provider(browser, tmp_path):
+    # v2 bub2-002 (43200 patches > 30000) and hard y0bvr6 (invalid image data) 400'd the whole run
+    code = ("from PIL import Image; Image.new('RGB', (1440, 30000), 'white').save('tall.png'); "
+            "open('bad.png', 'wb').write(b'\\x89PNG not really'); print(show_image('tall.png'), show_image('bad.png'))")
+    result, seen = await go(browser, tmp_path, [('python', {'code': code}), ('finish', {'result': 'ok'})])
+    part = next(p for p in seen[1].parts if isinstance(p, ToolReturnPart))
+    images = [c for c in part.content if not isinstance(c, str)]
+    assert result.status == 'completed' and len(images) == 1
+    from PIL import Image
+    import io
+    assert max(Image.open(io.BytesIO(images[0].data)).size) <= 2048
+    assert 'not a decodable image' in part.content[0]
+
+
+async def test_workspace_path_is_in_instructions(browser, tmp_path):
+    seen = []
+
+    def fn(messages, info: AgentInfo):
+        seen.append(info.instructions)
+        return ModelResponse(parts=[ToolCallPart('finish', {'result': 'ok'})])
+
+    agent, session = build_agent(), Session(repl=Repl(tmp_path, browser))
+    try:
+        with agent.override(model=FunctionModel(fn)):
+            await run(agent, 'task', session, 'gpt-6-luna')
+    finally:
+        await session.repl.close()
+    assert json.dumps(str(tmp_path.resolve())) in seen[0] and 'never `await` them' in seen[0]
+
