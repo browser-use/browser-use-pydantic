@@ -174,3 +174,36 @@ async def test_workspace_path_is_in_instructions(browser, tmp_path):
         await session.repl.close()
     assert json.dumps(str(tmp_path.resolve())) in seen[0] and 'never `await` them' in seen[0]
 
+
+async def test_text_reply_gets_one_delivery_repair_turn(browser, tmp_path):
+    # A text-only reply used to be impossible (tool_choice=required every turn). Now it is allowed, and ending the
+    # work in text triggers bu-pi's single delivery-repair turn with delivery tools forced.
+    from pydantic_ai.messages import RetryPromptPart, TextPart
+    from pydantic_ai.models import ModelRequestParameters
+    from pydantic_ai.models._tool_choice import resolve_tool_choice
+    from browser_use_pydantic.agent import DELIVERY_REPAIR
+
+    seen = []
+
+    def fn(messages, info: AgentInfo):
+        params = ModelRequestParameters(function_tools=info.function_tools, output_tools=info.output_tools,
+                                        allow_text_output=info.allow_text_output)
+        seen.append((messages[-1], resolve_tool_choice(info.model_settings, params)))
+        if len(seen) == 1:
+            return ModelResponse(parts=[ToolCallPart('python', {'code': 'rows = [1, 2, 3]'})])
+        if len(seen) == 2:
+            return ModelResponse(parts=[TextPart('I found 3 rows.')])
+        return ModelResponse(parts=[ToolCallPart('finish_from_repl', {'expression': 'json.dumps(rows)'})])
+
+    agent, session = build_agent(), Session(repl=Repl(tmp_path, browser))
+    try:
+        with agent.override(model=FunctionModel(fn)):
+            result = await run(agent, 'task', session, 'gpt-6-luna')
+    finally:
+        await session.repl.close()
+    assert [c for _, c in seen[:2]] == ['auto', 'auto']  # the model may stop and talk
+    repair_msg, repair_choice = seen[2]
+    assert any(DELIVERY_REPAIR in (p.model_response() if isinstance(p, RetryPromptPart) else str(getattr(p, 'content', '')))
+               for p in repair_msg.parts)
+    assert repair_choice == ('required', {'finish', 'finish_from_repl'})
+    assert (result.status, result.output) == ('completed', '[1, 2, 3]')

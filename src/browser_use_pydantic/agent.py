@@ -21,7 +21,7 @@ from typing import Any
 
 from genai_prices import Usage, calc_price
 from pydantic import TypeAdapter, ValidationError
-from pydantic_ai import Agent, BinaryContent, ModelRetry, RunContext, ToolOutput
+from pydantic_ai import Agent, BinaryContent, ModelRetry, RunContext, TextOutput, ToolOutput
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart, ThinkingPart, ToolReturnPart
 from pydantic_ai.models import ModelRequestContext
@@ -35,6 +35,11 @@ KEEP_IMAGE_RESULTS = 2
 DELIVER_NOW = (
     'Budget nearly exhausted. Deliver the verified result now with finish/finish_from_repl. '
     'Reference saved files; explicitly list missing evidence. Do not perform more browser actions.'
+)
+DELIVERY_REPAIR = (  # bu-pi src/agent.ts:560, verbatim except tool names
+    'The run ended without a validated delivery. Use finish_from_repl for an existing result or finish for a concise '
+    'answer. Preserve all verified records; report missing evidence honestly. Do not repeat browser actions. This is '
+    'the single delivery repair turn.'
 )
 
 
@@ -147,9 +152,24 @@ def _outputs(output_type: Any) -> list[ToolOutput]:
     def finish(result):
         return result
 
+    def on_text(ctx: RunContext[Session], text: str):
+        # Plain text keeps tool_choice=auto (as in bu-pi); a forced tool call every turn made finish() the only way to
+        # stop and talk. A text-only reply ends the work: one delivery-only repair turn, then text is accepted.
+        if not ctx.deps.finalizing:
+            ctx.deps.finalizing = True
+            raise ModelRetry(DELIVERY_REPAIR)
+        if output_type is str:
+            return text
+        try:
+            return adapter.validate_json(text)
+        except ValidationError as e:
+            raise ModelRetry(f'Deliver with finish or finish_from_repl; text does not match the result schema: {str(e)[:2000]}')
+
     finish.__annotations__ = {'result': output_type, 'return': output_type}
     finish_from_repl.__annotations__ = {'ctx': RunContext[Session], 'expression': str, 'return': output_type}
+    on_text.__annotations__ = {'ctx': RunContext[Session], 'text': str, 'return': output_type}
     return [
+        TextOutput(on_text),
         ToolOutput(finish_from_repl, name='finish_from_repl', description=(
             'Deliver an existing value from the persistent REPL without printing or rewriting it. The Python '
             'expression must match the result schema of finish; for a string result use json.dumps(records) or an '
@@ -216,6 +236,7 @@ def build_agent(
     settings: OpenAIResponsesModelSettings = {
         'openai_reasoning_effort': reasoning_effort,
         'openai_reasoning_summary': 'auto',
+        'openai_reasoning_context': 'auto',  # bu-pi sends no context; Pydantic AI would send all_turns
         'max_tokens': 32_768,
     }
     agent = Agent(
