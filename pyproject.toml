@@ -1,6 +1,6 @@
 [project]
 name = "browser-use-pydantic"
-version = "0.1.0"
+version = "0.2.0"
 description = "Browser Use on Pydantic AI: one persistent Python REPL tool on raw CDP"
 authors = [
     { name = "Gregor Žunič", email = "36313686+gregpr07@users.noreply.github.com" }

@@ -60,7 +60,7 @@ def clip(text: str, limit: int) -> str:
 
 def cloud(path: str, method: str, body: dict) -> dict:
     req = urllib.request.Request(
-        f'https://api.browser-use.com/api/v3{path}', method=method, data=json.dumps(body).encode(),
+        f'https://api.browser-use.com/api/v4{path}', method=method, data=json.dumps(body).encode(),
         headers={'X-Browser-Use-API-Key': os.environ['BROWSER_USE_API_KEY'], 'Content-Type': 'application/json'})
     with urllib.request.urlopen(req, timeout=30) as r:
         data = r.read()

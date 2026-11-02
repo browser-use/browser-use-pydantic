@@ -108,3 +108,25 @@ def test_openai_settings_unchanged():
     agent = build_agent('openai-responses:gpt-6-luna', reasoning_effort='medium')
     assert agent.model_settings == {'openai_reasoning_effort': 'medium', 'openai_reasoning_summary': 'auto',
                                     'openai_reasoning_context': 'auto', 'max_tokens': 32_768}
+
+
+async def test_remote_upload_sends_bytes(cdp_url, tmp_path):
+    """Cloud browsers can't read local paths: upload_file sends the file's bytes through the page."""
+    from browser_use_pydantic import Repl
+
+    browser = Browser(cdp_url=cdp_url)
+    repl = Repl(tmp_path, {**await browser.start(), 'BU_REMOTE_BROWSER': '1'})
+    try:
+        (tmp_path / 'cv.txt').write_text('hello cloud')
+        r = await repl.call('exec', "new_tab('data:text/html,<input type=file id=f>'); wait_for_load(); "
+                            "print(upload_file('#f', 'cv.txt'), js(\"document.getElementById('f').files[0].name + ':' "
+                            "+ document.getElementById('f').files[0].size\"))", 60)
+        assert r['error'] is None and '1 cv.txt:11' in r['output'], r
+    finally:
+        await repl.close()
+        await browser.stop()
+
+
+def test_cloud_api_is_v4():
+    from browser_use_pydantic.api import CLOUD_API
+    assert CLOUD_API == 'https://api.browser-use.com/api/v4'

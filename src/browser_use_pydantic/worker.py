@@ -96,6 +96,41 @@ def _install(ns: dict) -> None:
         return str(path)
 
     ns.update(screenshot=screenshot, show_image=show_image, checkpoint=checkpoint)
+    if os.environ.get('BU_REMOTE_BROWSER') == '1':
+        ns['upload_file'] = _remote_upload(ns['js'])
+
+
+def _remote_upload(js):
+    """upload_file for a remote browser: local paths mean nothing on the browser host, so send the bytes."""
+    import mimetypes
+
+    def upload_file(selector, path):
+        """Set local file(s) on a file input of the remote browser (bytes go through the page, 10MB each max)."""
+        files = []
+        for p in [path] if isinstance(path, (str, Path)) else path:
+            data = Path(p).read_bytes()
+            if len(data) > 10_000_000:
+                raise ValueError(f'{p} is over 10MB; remote uploads go through the page')
+            files.append({'name': Path(p).name, 'type': mimetypes.guess_type(str(p))[0] or 'application/octet-stream',
+                          'b64': base64.b64encode(data).decode()})
+        n = js(f'''(() => {{
+            const el = document.querySelector({json.dumps(selector)});
+            if (!el) return -1;
+            const dt = new DataTransfer();
+            for (const f of {json.dumps(files)}) {{
+                const bytes = Uint8Array.from(atob(f.b64), c => c.charCodeAt(0));
+                dt.items.add(new File([bytes], f.name, {{type: f.type}}));
+            }}
+            el.files = dt.files;
+            el.dispatchEvent(new Event('input', {{bubbles: true}}));
+            el.dispatchEvent(new Event('change', {{bubbles: true}}));
+            return el.files.length;
+        }})()''')
+        if n == -1:
+            raise RuntimeError(f'no element for {selector}')
+        return n
+
+    return upload_file
 
 
 def _display(value) -> None:
