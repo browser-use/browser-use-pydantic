@@ -207,3 +207,57 @@ async def test_text_reply_gets_one_delivery_repair_turn(browser, tmp_path):
                for p in repair_msg.parts)
     assert repair_choice == ('required', {'finish', 'finish_from_repl'})
     assert (result.status, result.output) == ('completed', '[1, 2, 3]')
+
+
+def _choice_recorder(responses):
+    from pydantic_ai.models import ModelRequestParameters
+    from pydantic_ai.models._tool_choice import resolve_tool_choice
+    seen = []
+
+    def fn(messages, info: AgentInfo):
+        params = ModelRequestParameters(function_tools=info.function_tools, output_tools=info.output_tools,
+                                        allow_text_output=info.allow_text_output)
+        seen.append((messages, resolve_tool_choice(info.model_settings, params)))
+        return responses[len(seen) - 1]
+
+    return FunctionModel(fn), seen
+
+
+async def test_budget_turn_forces_delivery_on_the_same_request(browser, tmp_path):
+    # v1b let one more python call through after "Budget nearly exhausted" (settings resolved before the hook);
+    # in 4n89qk/t4p501 that turn was spent and the forced finish came one turn late.
+    from browser_use_pydantic.agent import DELIVER_NOW
+    model, seen = _choice_recorder([ModelResponse(parts=[ToolCallPart('python', {'code': 'x = 1'})]),
+                                    ModelResponse(parts=[ToolCallPart('finish', {'result': 'one'})])])
+    agent, session = build_agent(), Session(repl=Repl(tmp_path, browser), max_steps=3)
+    try:
+        with agent.override(model=model):
+            result = await run(agent, 'task', session, 'gpt-6-luna')
+    finally:
+        await session.repl.close()
+    assert seen[0][1] == 'auto'
+    assert DELIVER_NOW in str(seen[1][0][-1]) and seen[1][1] == ('required', {'finish', 'finish_from_repl'})
+    assert result.output == 'one'
+
+
+@pytest.mark.parametrize('first', ['...', 'Saved: [leads](leads.csv)'])
+async def test_placeholder_or_missing_file_delivery_gets_one_repair(browser, tmp_path, first):
+    # 4n89qk delivered finish("..."); t4p501 linked leads_verified.csv that was never written.
+    model, seen = _choice_recorder([ModelResponse(parts=[ToolCallPart('finish', {'result': first})]),
+                                    ModelResponse(parts=[ToolCallPart('finish', {'result': first})])])
+    agent, session = build_agent(), Session(repl=Repl(tmp_path, browser))
+    try:
+        with agent.override(model=model):
+            result = await run(agent, 'task', session, 'gpt-6-luna')
+    finally:
+        await session.repl.close()
+    retry = [p.content for p in seen[1][0][-1].parts if getattr(p, 'outcome', None) == 'retried']
+    assert retry and ('placeholder' in retry[0] or 'leads.csv' in retry[0])
+    assert (len(seen), result.status, result.output) == (2, 'completed', first)  # second identical finish accepted
+
+
+async def test_existing_file_link_and_short_answer_pass(browser, tmp_path):
+    (tmp_path / 'out.csv').write_text('a\n1\n')
+    for answer in ['7', 'See [out.csv](out.csv) and [site](https://example.com)']:
+        result, seen = await go(browser, tmp_path, [('finish', {'result': answer})])
+        assert (len(seen), result.output) == (1, answer)

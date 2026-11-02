@@ -11,6 +11,7 @@ import asyncio
 import base64
 import json
 import os
+import re
 import socket
 import sys
 import time
@@ -41,6 +42,8 @@ DELIVERY_REPAIR = (  # bu-pi src/agent.ts:560, verbatim except tool names
     'answer. Preserve all verified records; report missing evidence honestly. Do not repeat browser actions. This is '
     'the single delivery repair turn.'
 )
+DELIVERY_TOOLS = ['finish_from_repl', 'finish']
+LINK = re.compile(r'\]\(<?([^)\s>]+)>?\)')  # markdown link targets
 
 
 class Repl:
@@ -109,6 +112,7 @@ class Session:
     cell_timeout_s: float = 120
     started: float = field(default_factory=time.monotonic)
     finalizing: bool = False
+    checked_delivery: bool = False  # the delivery guard fires once; a second identical finish is accepted
     messages: list[ModelMessage] = field(default_factory=list)
     after_tool: Callable[[str, dict, dict], Awaitable[None]] | None = None  # observer hook (evals)
 
@@ -135,6 +139,26 @@ async def python(ctx: RunContext[Session], code: str) -> list[Any]:
     return [text or '(no output)', *shots]
 
 
+def check_delivery(ctx: RunContext[Session], value: Any) -> None:
+    """One repair for deliveries that are a placeholder or link workspace files that were never written."""
+    if ctx.deps.checked_delivery:
+        return
+    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
+    problem = None
+    if not re.search(r'[^\W_]', text):  # '...', '' (a one-character answer like '7' is fine)
+        problem = f'The result {text[:20]!r} is a placeholder, not the answer.'
+    else:
+        root = ctx.deps.repl.workspace
+        missing = sorted({t for t in LINK.findall(text) if not re.match(r'^([a-z][\w+.-]*:|#|//)', t, re.I)
+                          and not (root / t.split('#')[0]).exists()})
+        if missing:
+            problem = f'These linked files do not exist in the workspace: {", ".join(missing[:10])}.'
+    if problem:
+        ctx.deps.checked_delivery = True
+        raise ModelRetry(f'{problem} Deliver the actual result: finish_from_repl with the existing records, or finish '
+                         'with the full answer inline. Do not repeat browser actions.')
+
+
 def _outputs(output_type: Any) -> list[ToolOutput]:
     adapter = TypeAdapter(output_type)
 
@@ -143,13 +167,15 @@ def _outputs(output_type: Any) -> list[ToolOutput]:
         if r['error']:
             raise ModelRetry(f'Expression failed: {r["error"][-2000:]}')
         if output_type is str:
+            check_delivery(ctx, r['value'])
             return r['value']
         try:
             return adapter.validate_json(r['value'])
         except ValidationError as e:
             raise ModelRetry(f'Value does not match the result schema: {str(e)[:2000]}')
 
-    def finish(result):
+    def finish(ctx: RunContext[Session], result):
+        check_delivery(ctx, result)
         return result
 
     def on_text(ctx: RunContext[Session], text: str):
@@ -159,13 +185,14 @@ def _outputs(output_type: Any) -> list[ToolOutput]:
             ctx.deps.finalizing = True
             raise ModelRetry(DELIVERY_REPAIR)
         if output_type is str:
+            check_delivery(ctx, text)
             return text
         try:
             return adapter.validate_json(text)
         except ValidationError as e:
             raise ModelRetry(f'Deliver with finish or finish_from_repl; text does not match the result schema: {str(e)[:2000]}')
 
-    finish.__annotations__ = {'result': output_type, 'return': output_type}
+    finish.__annotations__ = {'ctx': RunContext[Session], 'result': output_type, 'return': output_type}
     finish_from_repl.__annotations__ = {'ctx': RunContext[Session], 'expression': str, 'return': output_type}
     on_text.__annotations__ = {'ctx': RunContext[Session], 'text': str, 'return': output_type}
     return [
@@ -195,11 +222,13 @@ class BrowserLoop(AbstractCapability[Session]):
         ):
             s.finalizing = True
             ctx.enqueue(DELIVER_NOW)
+            # Step settings were resolved before this hook; restrict this very request, not only the next one.
+            request_context.model_settings = {**(request_context.model_settings or {}), 'tool_choice': DELIVERY_TOOLS}
         return request_context
 
     def get_model_settings(self):
         # allowed_tools keeps the tool list (cached prefix) while forcing delivery.
-        return lambda ctx: {'tool_choice': ['finish_from_repl', 'finish']} if ctx.deps.finalizing else {}
+        return lambda ctx: {'tool_choice': DELIVERY_TOOLS} if ctx.deps.finalizing else {}
 
 
 def _is_image(c: Any) -> bool:

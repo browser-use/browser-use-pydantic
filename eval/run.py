@@ -153,18 +153,27 @@ async def main() -> int:
             agent_steps.write(f'{name}{" ERROR" if r["error"] else ""}\n{json.dumps(result)}\n')
             events.flush()
             agent_steps.flush()
-            started = time.monotonic()
-            try:  # observer screenshot of the agent's attached tab, for the judge only
-                data = await asyncio.wait_for(asyncio.to_thread(capture), 3.5)  # bu-pi observerTimeoutMs
-                shot = shots_dir / f'{len(list(shots_dir.iterdir())) + 1:03d}.{"png" if findings else "jpg"}'
-                shot.write_bytes(data)
-                if findings:
-                    shots.append(str(shot.relative_to(workspace)))
-                    shot_steps.append(len(steps))
-            except Exception as e:  # noqa: BLE001
-                if len(shot_errors) < 20:
-                    shot_errors.append(str(e)[:500])
-            shot_time[0] += time.monotonic() - started
+            observer['pending'] = True  # bu-pi Observer: one capture in flight, latest event wins, never blocks
+            if observer['task'] is None or observer['task'].done():
+                observer['task'] = asyncio.create_task(observe())
+
+        observer: dict = {'pending': False, 'task': None}
+
+        async def observe() -> None:
+            while observer['pending']:
+                observer['pending'] = False
+                started, step = time.monotonic(), len(steps)
+                try:  # observer screenshot of the agent's attached tab, for the judge only
+                    data = await asyncio.wait_for(asyncio.to_thread(capture), 3.5)  # bu-pi observerTimeoutMs
+                    shot = shots_dir / f'{len(list(shots_dir.iterdir())) + 1:03d}.{"png" if findings else "jpg"}'
+                    shot.write_bytes(data)
+                    if findings:
+                        shots.append(str(shot.relative_to(workspace)))
+                        shot_steps.append(step)
+                except Exception as e:  # noqa: BLE001
+                    if len(shot_errors) < 20:
+                        shot_errors.append(str(e)[:500])
+                shot_time[0] += time.monotonic() - started
 
         agent = build_agent(
             f'openai-responses:{model_name}', reasoning_effort=options['reasoning_effort'],
@@ -175,6 +184,9 @@ async def main() -> int:
                           after_tool=after_tool)
         prompt = task['confirmed_task'] + (f'\nStarting website: {task["website"]}' if task.get('website') else '')
         res = await run(agent, prompt, session, model_name)
+        if observer['task']:
+            observer['pending'] = False
+            await asyncio.gather(observer['task'], return_exceptions=True)
         events.close()
         agent_steps.close()
 
