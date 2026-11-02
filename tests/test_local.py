@@ -240,7 +240,7 @@ async def test_budget_turn_forces_delivery_on_the_same_request(browser, tmp_path
     assert result.output == 'one'
 
 
-@pytest.mark.parametrize('first', ['...', 'Saved: [leads](leads.csv)'])
+@pytest.mark.parametrize('first', ['...', 'Saved: [leads](leads.csv)', 'Saved in the workspace: `leads.csv`'])
 async def test_placeholder_or_missing_file_delivery_gets_one_repair(browser, tmp_path, first):
     # 4n89qk delivered finish("..."); t4p501 linked leads_verified.csv that was never written.
     model, seen = _choice_recorder([ModelResponse(parts=[ToolCallPart('finish', {'result': first})]),
@@ -258,6 +258,6 @@ async def test_placeholder_or_missing_file_delivery_gets_one_repair(browser, tmp
 
 async def test_existing_file_link_and_short_answer_pass(browser, tmp_path):
     (tmp_path / 'out.csv').write_text('a\n1\n')
-    for answer in ['7', 'See [out.csv](out.csv) and [site](https://example.com)']:
+    for answer in ['7', 'See [out.csv](out.csv), `out.csv` and [site](https://example.com)']:
         result, seen = await go(browser, tmp_path, [('finish', {'result': answer})])
         assert (len(seen), result.output) == (1, answer)

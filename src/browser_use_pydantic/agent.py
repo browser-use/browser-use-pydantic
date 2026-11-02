@@ -44,6 +44,7 @@ DELIVERY_REPAIR = (  # bu-pi src/agent.ts:560, verbatim except tool names
 )
 DELIVERY_TOOLS = ['finish_from_repl', 'finish']
 LINK = re.compile(r'\]\(<?([^)\s>]+)>?\)')  # markdown link targets
+FILE = re.compile(r'`([\w./-]+\.(?:md|csv|json|jsonl|txt|tsv|xlsx|html|zip|pdf|png|jpe?g))`')  # `basket_brief.md`
 
 
 class Repl:
@@ -149,7 +150,7 @@ def check_delivery(ctx: RunContext[Session], value: Any) -> None:
         problem = f'The result {text[:20]!r} is a placeholder, not the answer.'
     else:
         root = ctx.deps.repl.workspace
-        missing = sorted({t for t in LINK.findall(text) if not re.match(r'^([a-z][\w+.-]*:|#|//)', t, re.I)
+        missing = sorted({t for t in LINK.findall(text) + FILE.findall(text) if not re.match(r'^([a-z][\w+.-]*:|#|//)', t, re.I)
                           and not (root / t.split('#')[0]).exists()})
         if missing:
             problem = f'These linked files do not exist in the workspace: {", ".join(missing[:10])}.'
