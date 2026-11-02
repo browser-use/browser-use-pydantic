@@ -3,7 +3,7 @@
 Browser Use on Pydantic AI. The agent writes Python against raw CDP ([browser-harness](https://github.com/browser-use/browser-harness)).
 
 ```sh
-uv add git+https://github.com/browser-use/browser-use-pydantic
+uv add browser-use-pydantic
 export OPENAI_API_KEY=...
 ```
 

@@ -6,10 +6,15 @@ authors = [
     { name = "Gregor Žunič", email = "36313686+gregpr07@users.noreply.github.com" }
 ]
 requires-python = ">=3.12"
+license = "MIT"
+readme = "README.md"
 dependencies = [
     "browser-harness>=0.1.13",
     "pydantic-ai-slim[openai]>=2.64.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/browser-use/browser-use-pydantic"
 
 [project.optional-dependencies]
 eval = [
@@ -34,3 +39,6 @@ dev = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+
+[tool.hatch.build.targets.sdist]
+include = ["/src", "/tests", "/eval", "/README.md", "/LICENSE", "/pyproject.toml"]
