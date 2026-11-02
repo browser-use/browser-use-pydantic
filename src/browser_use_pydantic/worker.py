@@ -25,24 +25,35 @@ STATE = Path(os.environ.get('BU_STATE_DIR', '.browser-use'))
 images: list[dict] = []
 
 
-def _add_image(data: bytes, media_type: str = 'image/png') -> bool:
-    if len(images) >= MAX_IMAGES_PER_CELL:
-        print(f'[image dropped: {MAX_IMAGES_PER_CELL} per call max]')
-        return False
+def fit_image(data: bytes, media_type: str = 'image/png') -> tuple[bytes, str] | str:
+    """Decode and downscale an image for the provider. Returns (data, media_type) or a drop message.
+
+    Shared by both code backends (this REPL worker and the Monty host tools)."""
     from PIL import Image
 
     try:  # providers 400 the whole request on an undecodable or oversized image
         img = Image.open(io.BytesIO(data))
         img.load()
     except Exception as e:  # noqa: BLE001
-        print(f'[image dropped: not a decodable image ({type(e).__name__})]')
-        return False
+        return f'[image dropped: not a decodable image ({type(e).__name__})]'
     if len(data) > 5_000_000 or max(img.size) > MAX_IMAGE_SIDE:
         img = img.convert('RGB')
         img.thumbnail((MAX_IMAGE_SIDE, MAX_IMAGE_SIDE))
         out = io.BytesIO()
         img.save(out, 'JPEG', quality=80)
         data, media_type = out.getvalue(), 'image/jpeg'
+    return data, media_type
+
+
+def _add_image(data: bytes, media_type: str = 'image/png') -> bool:
+    if len(images) >= MAX_IMAGES_PER_CELL:
+        print(f'[image dropped: {MAX_IMAGES_PER_CELL} per call max]')
+        return False
+    fitted = fit_image(data, media_type)
+    if isinstance(fitted, str):
+        print(fitted)
+        return False
+    data, media_type = fitted
     images.append({'data': base64.b64encode(data).decode(), 'media_type': media_type})
     return True
 

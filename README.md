@@ -15,6 +15,7 @@ Carried over from browser-use-pi because evals rewarded them: `finish_from_repl`
 - `src/browser_use_pydantic/agent.py` agent, tool, delivery, budgets
 - `src/browser_use_pydantic/worker.py` REPL child process
 - `src/browser_use_pydantic/prompt.py` system prompt
+- `src/browser_use_pydantic/monty.py` experimental backend (`uv sync --extra monty`): `build_agent(backend='monty', workspace=ws)` + `Session(repl=MontyRepl(ws))` runs code in Pydantic's Monty sandbox via CodeMode `run_code`; eval option `code_backend: "monty"`
 - `eval/` the browser-use-pi eval contract (`setup.sh`, `run.mjs` -> `run.py`)
 
 Tests: `uv run pytest` (real headless Chrome, scripted model, no provider calls).

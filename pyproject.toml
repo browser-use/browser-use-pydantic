@@ -17,6 +17,10 @@ eval = [
     "openpyxl==3.1.5",
     "pypdf==6.14.2",
 ]
+monty = [  # experimental: run_code in Pydantic's Monty sandbox instead of the CPython REPL worker
+    "pydantic-ai-harness[codemode]==0.64.0",
+    "pydantic-monty==1.4.0",
+]
 
 [build-system]
 requires = ["hatchling"]

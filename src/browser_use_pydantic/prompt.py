@@ -39,3 +39,28 @@ Finish the whole job. When the task says each, every or all, or gives a count, c
 Keep source observations unchanged. Distinguish discovered, attempted, fetched and verified. Derive access logs from actual requests. Never invent statuses, timestamps or coverage. Mark inferred values explicitly. Check final claims against source records, including filters, dates, identities, counts and source coverage.
 
 Finish with finish_from_repl(expression='result_variable') to deliver existing data directly through the requested schema. For the default string schema, json.dumps(records) works. finish(result=...) accepts short answers. Schema validity does not prove factual correctness. Larger outputs belong in files. Include sources for research. Never drop records merely to fit a response."""
+
+
+def _swap(text: str, *pairs: tuple[str, str]) -> str:
+    for old, new in pairs:
+        assert text.count(old) == 1, old
+        text = text.replace(old, new)
+    return text
+
+
+# Experimental Monty backend (monty.py): same prompt, only the code-execution paragraphs differ.
+MONTY_SYSTEM_PROMPT = _swap(
+    SYSTEM_PROMPT,
+    ('python runs code in a persistent Python REPL. Variables, imports and functions survive calls; the last expression '
+     'is printed. The working directory is the workspace. All browser helpers below are synchronous: call them directly, '
+     'never `await` them (top-level await works only for your own async code).',
+     'run_code runs code in a persistent sandboxed Python REPL (Monty). Variables, imports and functions survive calls; '
+     'the last expression is returned. The working directory is the workspace; open() and pathlib work only inside it. '
+     'All browser helpers below are pre-defined synchronous functions: call them directly, never `await` them. Monty is '
+     'a Python subset: no class inheritance, generators/yield, `del`, or third-party imports, and only part of the '
+     'stdlib (json, re, csv, datetime, math, collections, itertools, functools, pathlib, os, base64, hashlib, asyncio; '
+     'no io, urllib, html, zipfile or subprocess).'),
+    ('Shell commands work through subprocess.', 'There is no shell.'),
+    ('A normal Python or CDP error preserves REPL state; a cell timeout or worker exit loses it.',
+     'A normal Python or CDP error preserves REPL state; a cell timeout or sandbox reset loses it.'),
+)

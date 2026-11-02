@@ -160,11 +160,15 @@ def check_delivery(ctx: RunContext[Session], value: Any) -> None:
                          'with the full answer inline. Do not repeat browser actions.')
 
 
-def _outputs(output_type: Any) -> list[ToolOutput]:
+def _outputs(output_type: Any, backend: str = 'repl') -> list[ToolOutput]:
     adapter = TypeAdapter(output_type)
 
     async def finish_from_repl(ctx: RunContext[Session], expression: str):
-        r = await ctx.deps.repl.call('eval', expression, ctx.deps.cell_timeout_s)
+        if backend == 'monty':  # same sandbox session as run_code (no child process to eval in)
+            from .monty import evaluate
+            r = await evaluate(ctx, expression, ctx.deps.cell_timeout_s)
+        else:
+            r = await ctx.deps.repl.call('eval', expression, ctx.deps.cell_timeout_s)
         if r['error']:
             raise ModelRetry(f'Expression failed: {r["error"][-2000:]}')
         if output_type is str:
@@ -262,23 +266,37 @@ def build_agent(
     reasoning_effort: str = 'medium',
     instructions: str = '',
     compact_at_tokens: int = 150_000,
+    backend: str = 'repl',
+    workspace: Path | None = None,
 ) -> Agent[Session, Any]:
+    """backend='repl' (default): python tool on the CPython worker. backend='monty' (experimental, extra `monty`):
+    CodeMode run_code in the Monty sandbox; needs the run's workspace (mounted into the sandbox) and a MontyRepl."""
     settings: OpenAIResponsesModelSettings = {
         'openai_reasoning_effort': reasoning_effort,
         'openai_reasoning_summary': 'auto',
         'openai_reasoning_context': 'auto',  # bu-pi sends no context; Pydantic AI would send all_turns
         'max_tokens': 32_768,
     }
+    prompt, tools, extra = SYSTEM_PROMPT, [python], []
+    if backend == 'monty':
+        from .monty import MontyCell, code_mode, monty_toolset_tools
+        from .prompt import MONTY_SYSTEM_PROMPT
+
+        if workspace is None:
+            raise ValueError("backend='monty' needs workspace= (mounted read-write into the sandbox)")
+        prompt, tools, extra = MONTY_SYSTEM_PROMPT, monty_toolset_tools(), [MontyCell(), code_mode(workspace)]
+    elif backend != 'repl':
+        raise ValueError(f'Unknown backend {backend!r}')
     agent = Agent(
         model,
         deps_type=Session,
         defer_model_check=True,
-        output_type=_outputs(output_type),
-        instructions=f'{SYSTEM_PROMPT}\n{instructions}'.strip(),
-        tools=[python],
+        output_type=_outputs(output_type, backend),
+        instructions=f'{prompt}\n{instructions}'.strip(),
+        tools=tools,
         model_settings=settings,
         retries={'tools': 1, 'output': 3},
-        capabilities=[BrowserLoop(), OpenAICompaction(token_threshold=compact_at_tokens)],
+        capabilities=[BrowserLoop(), *extra, OpenAICompaction(token_threshold=compact_at_tokens)],
     )
 
     @agent.instructions
