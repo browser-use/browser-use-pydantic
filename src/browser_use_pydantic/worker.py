@@ -1,6 +1,6 @@
 """Persistent Python REPL for one agent. Runs as a child process so a hung cell can be killed.
 
-Namespace = browser-harness helpers + screenshot/show_image/checkpoint. Protocol: one JSON line
+Namespace = browser-harness helpers + screenshot/show_image/checkpoint (+ bu in ultrafast mode, see ax.py). Protocol: one JSON line
 per message over the socket fd passed in argv[1]. Cell stdout/stderr (including subprocesses)
 go to a per-cell file, so a killed cell still leaves its partial output on disk.
 """
@@ -17,6 +17,8 @@ import socket
 import sys
 import traceback
 from pathlib import Path
+
+from browser_use_pydantic import ax
 
 MAX_IMAGES_PER_CELL = 4
 MAX_IMAGE_SIDE = 2048  # full-page captures exceeded OpenAI's 30k-patch limit (bub2-002)
@@ -47,7 +49,7 @@ def _add_image(data: bytes, media_type: str = 'image/png') -> bool:
     return True
 
 
-def _install(ns: dict) -> None:
+def _install(ns: dict) -> ax.AxHelpers | None:
     from browser_harness import helpers
 
     raw_cdp = helpers.cdp
@@ -98,6 +100,11 @@ def _install(ns: dict) -> None:
     ns.update(screenshot=screenshot, show_image=show_image, checkpoint=checkpoint)
     if os.environ.get('BU_REMOTE_BROWSER') == '1':
         ns['upload_file'] = _remote_upload(ns['js'])
+    if os.environ.get('BU_MODE') != 'ultrafast':
+        return None
+    bu = ns['bu'] = ax.AxHelpers(cdp)
+    helpers.drain_events = ns['drain_events'] = bu.drain_events  # bu reads the daemon's events; the agent still gets them
+    return bu
 
 
 def _remote_upload(js):
@@ -134,7 +141,7 @@ def _remote_upload(js):
 
 
 def _display(value) -> None:
-    if value is None:
+    if value is None or isinstance(value, ax.Printed):  # bu already printed it
         return
     print(value if isinstance(value, str) else pprint.pformat(value, width=120, sort_dicts=False))
 
@@ -158,8 +165,8 @@ def _run(code_obj, ns, loop):
 
 def _error(e: BaseException) -> str:
     lines = traceback.format_exception(e)
-    # Drop worker frames; keep the user's cell frames and the exception itself.
-    keep = [lines[0]] + [l for l in lines[1:] if not l.lstrip().startswith('File "' + __file__)]
+    # Drop worker and bu frames; keep the user's cell frames and the exception itself.
+    keep = [lines[0]] + [l for l in lines[1:] if not l.lstrip().startswith(('File "' + __file__, 'File "' + ax.__file__))]
     return ''.join(keep).strip()
 
 
@@ -171,7 +178,7 @@ def main() -> None:
     sys.stdout.reconfigure(line_buffering=True)
     sys.stderr.reconfigure(line_buffering=True)
     ns: dict = {'__name__': '__main__', '__bu_display': _display}
-    _install(ns)
+    bu = _install(ns)
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
@@ -202,6 +209,12 @@ def main() -> None:
                 else:
                     error = _error(e)
             finally:
+                # After a cell whose bu actions reached the page, show the resulting state without another model turn.
+                if bu is not None and bu.acted:
+                    try:
+                        bu.state()
+                    except Exception as e:  # noqa: BLE001
+                        print(f'[state unavailable: {type(e).__name__}: {e}]')
                 sys.stdout.flush()
                 sys.stderr.flush()
                 os.dup2(saved[0], 1)

@@ -22,7 +22,7 @@ from pydantic_ai.messages import ModelMessage
 
 os.environ.setdefault('PYDANTIC_AI_NO_BANNER', '1')  # a library should not print an ad on every run
 
-from .agent import Repl, RunResult, Session, build_agent, model_ref, run
+from .agent import Repl, RunResult, Session, build_agent, check_mode, model_ref, run
 
 
 CLOUD_API = 'https://api.browser-use.com/api/v4'
@@ -166,14 +166,19 @@ class Browser:
 
 
 class Agent:
-    """agent = Agent(task, llm='openai/gpt-6-luna'); result = await agent.run(); result.final_result()"""
+    """agent = Agent(task, llm='openai/gpt-6-luna'); result = await agent.run(); result.final_result()
+
+    mode='ultrafast' adds the `bu` helpers (page state and actions by accessibility-tree id, short page-settle waits)
+    to the REPL."""
 
     def __init__(self, task: str, llm: Any = 'openai/gpt-6-luna', *, browser: Browser | None = None,
-                 output_model_schema: Any = str, reasoning: str = 'medium', workspace: str | Path | None = None):
+                 output_model_schema: Any = str, reasoning: str = 'medium', workspace: str | Path | None = None,
+                 mode: str | None = 'default'):
+        self.mode = check_mode(mode)
         self.task, self.llm, self.browser = task, model_ref(llm), browser or Browser()
         self.workspace = Path(workspace or tempfile.mkdtemp(prefix='browser-use-')).resolve()
         self._agent = build_agent(self.llm, output_type=output_model_schema, reasoning_effort=reasoning,
-                                  instructions=CLOUD_PROMPT if self.browser.use_cloud else '')
+                                  instructions=CLOUD_PROMPT if self.browser.use_cloud else '', mode=self.mode)
         self._repl: Repl | None = None
         self._history: list[ModelMessage] | None = None
         self._continue = False
@@ -185,7 +190,7 @@ class Agent:
     async def run(self, max_steps: int = 100, timeout: float = 1700) -> RunResult:
         if self._repl is None:
             self.workspace.mkdir(parents=True, exist_ok=True)
-            self._repl = Repl(self.workspace, await self.browser.start())
+            self._repl = Repl(self.workspace, await self.browser.start(), mode=self.mode)
         (self._repl.state / 'partial.json').unlink(missing_ok=True)  # a partial belongs to one run
         session = Session(repl=self._repl, timeout_s=timeout, max_steps=max_steps)
         name = self.llm if isinstance(self.llm, str) else getattr(self.llm, 'model_name', '')

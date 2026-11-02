@@ -65,6 +65,7 @@ Agent(task, llm='openai/gpt-6-luna',     # default; or 'anthropic/...', 'openrou
       browser=Browser(),                 # Browser(): your Chrome · Browser(cdp_url=...) · Browser(use_cloud=True)
       output_model_schema=MyModel,       # typed result in result.structured_output
       reasoning='medium',                # default
+      mode='default',                    # or 'ultrafast', below
       workspace='./work')                # files the agent saves; default: a temp dir
 
 result = await agent.run(max_steps=100, timeout=1700)
@@ -72,6 +73,8 @@ result.final_result()   # answer text, or None if unfinished
 result.status           # completed | max_steps | timeout | error
 result.partial          # last checkpoint(..., partial=True) when unfinished
 ```
+
+- **Ultrafast:** `mode='ultrafast'` prints a compact accessibility-tree state and acts on its ids, waiting only briefly after each action, for interaction-heavy tasks. The REPL gets `bu.state()`, `bu.click(id)` and `bu.type(id, text, enter=False)`, the same helpers as Browser Use Pi's ultrafast mode.
 
 ## How it works
 

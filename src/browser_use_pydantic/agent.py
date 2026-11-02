@@ -29,6 +29,7 @@ from pydantic_ai.models import ModelRequestContext
 from pydantic_ai.models.openai import OpenAICompaction, OpenAIResponsesModelSettings
 from pydantic_ai.usage import UsageLimits
 
+from .ax import AX_PROMPT
 from .prompt import SYSTEM_PROMPT
 
 MAX_OUTPUT_CHARS = 12_000
@@ -43,17 +44,28 @@ DELIVERY_REPAIR = (  # bu-pi src/agent.ts:560, verbatim except tool names
     'the single delivery repair turn.'
 )
 DELIVERY_TOOLS = ['finish_from_repl', 'finish']
+MODES = ('default', 'ultrafast')
 LINK = re.compile(r'\]\(<?([^)\s>]+)>?\)')  # markdown link targets
 PARTIAL = re.compile(r'\b(partial(ly)?|incomplete|not (fully |yet |individually )?(verified|checked|opened|covered)|subset|sample of|'
                      r'first page only|only \d+ of|remaining \d+|did not (check|cover|open|verify|reach))\b', re.I)
 FILE = re.compile(r'`([\w./-]+\.(?:md|csv|json|jsonl|txt|tsv|xlsx|html|zip|pdf|png|jpe?g))`')  # `basket_brief.md`
 
 
-class Repl:
-    """Parent side of worker.py. Kill-and-restart on timeout; files and the browser survive."""
+def check_mode(mode: str | None) -> str:
+    if mode is None:  # Pi: mode undefined means 'default'
+        return 'default'
+    if mode not in MODES:
+        raise ValueError("mode must be 'default' or 'ultrafast'.")
+    return mode
 
-    def __init__(self, workspace: Path, env: dict[str, str] | None = None):
-        self.workspace, self.env, self.n = workspace, env or {}, 0
+
+class Repl:
+    """Parent side of worker.py. Kill-and-restart on timeout; files and the browser survive.
+
+    mode='ultrafast' adds the `bu` helpers to the worker (BU_MODE=ultrafast)."""
+
+    def __init__(self, workspace: Path, env: dict[str, str] | None = None, mode: str | None = 'default'):
+        self.workspace, self.env, self.n, self.mode = workspace, env or {}, 0, check_mode(mode)
         self.proc: asyncio.subprocess.Process | None = None
         self.state = workspace / '.browser-use'
         self.lock = asyncio.Lock()  # the model may emit parallel python calls; the worker runs one cell at a time
@@ -65,7 +77,8 @@ class Repl:
         self.proc = await asyncio.create_subprocess_exec(
             sys.executable, '-m', 'browser_use_pydantic.worker', str(child.fileno()),
             cwd=self.workspace, pass_fds=[child.fileno()], stdin=asyncio.subprocess.DEVNULL,
-            stdout=log, stderr=log, env={**os.environ, 'BH_TAB_MARKER': '0', **self.env, 'BU_STATE_DIR': str(self.state)},
+            stdout=log, stderr=log, env={**os.environ, 'BH_TAB_MARKER': '0', **self.env, 'BU_STATE_DIR': str(self.state),
+                                         **({'BU_MODE': 'ultrafast'} if self.mode == 'ultrafast' else {})},
         )
         child.close()
         log.close()
@@ -81,8 +94,9 @@ class Repl:
         self.proc = None
 
     async def call(self, op: str, code: str, timeout: float) -> dict[str, Any]:
+        # Ultrafast prints the page state after the cell's code, so its cells may run up to 10 s past the timeout.
         async with self.lock:
-            return await self._call(op, code, timeout)
+            return await self._call(op, code, timeout + (10 if self.mode == 'ultrafast' else 0))
 
     async def _call(self, op: str, code: str, timeout: float) -> dict[str, Any]:
         if self.proc is None or self.proc.returncode is not None:
@@ -281,7 +295,10 @@ def build_agent(
     reasoning_effort: str = 'medium',
     instructions: str = '',
     compact_at_tokens: int = 150_000,
+    mode: str | None = 'default',
 ) -> Agent[Session, Any]:
+    """mode='ultrafast' appends AX_PROMPT (the `bu` helpers) to the system prompt; the Repl needs the same mode."""
+    mode = check_mode(mode)
     model = model_ref(model)
     openai = not isinstance(model, str) or model.startswith(('openai-responses:', 'openai:'))
     if openai:  # the evaluated configuration; unchanged
@@ -300,7 +317,7 @@ def build_agent(
         deps_type=Session,
         defer_model_check=True,
         output_type=_outputs(output_type),
-        instructions=f'{SYSTEM_PROMPT}\n{instructions}'.strip(),
+        instructions=f'{SYSTEM_PROMPT}{AX_PROMPT if mode == "ultrafast" else ""}\n{instructions}'.strip(),
         tools=[python],
         model_settings=settings,
         retries={'tools': 1, 'output': 5},
