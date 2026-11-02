@@ -19,7 +19,7 @@ from pathlib import Path
 
 ALLOWED = {'reasoning_effort', 'max_context_chars', 'task_timeout_seconds', 'proxy_country_code',
            'browser_timeout_minutes', 'browser_allow_resizing', 'evidence_format', 'research_tools',
-           'delivery_review'}
+           'delivery_review', 'code_backend'}
 INSTRUCTIONS = {
     True: 'Use browser UI, public search and source APIs for research; use files/scripts for processing.',
     False: 'Use browser UI and page evaluation for research. Do not use web search.',
@@ -46,6 +46,8 @@ def parse_options(value: dict) -> dict:
         raise ValueError('evidence_format must be findings when provided')
     if o.get('delivery_review'):
         raise ValueError('delivery_review is not implemented in this adapter')
+    if o.get('code_backend', 'repl') not in ('repl', 'monty'):
+        raise ValueError('code_backend must be repl or monty')
     return o
 
 
@@ -175,11 +177,16 @@ async def main() -> int:
                         shot_errors.append(str(e)[:500])
                 shot_time[0] += time.monotonic() - started
 
+        monty = options.get('code_backend') == 'monty'
         agent = build_agent(
             f'openai-responses:{model_name}', reasoning_effort=options['reasoning_effort'],
             instructions=INSTRUCTIONS[findings] + INSTRUCTIONS_TAIL,
-            compact_at_tokens=int(options['max_context_chars'] * 0.75 / 4))
-        session = Session(repl=Repl(output_dir, {'BU_NAME': bu_name}), timeout_s=options['task_timeout_seconds'],
+            compact_at_tokens=int(options['max_context_chars'] * 0.75 / 4),
+            **({'backend': 'monty', 'workspace': output_dir} if monty else {}))
+        if monty:
+            from browser_use_pydantic.monty import MontyRepl
+        repl = (MontyRepl if monty else Repl)(output_dir, {'BU_NAME': bu_name})
+        session = Session(repl=repl, timeout_s=options['task_timeout_seconds'],
                           max_steps=int(env.get('EVAL_MAX_STEPS') or 35), cell_timeout_s=120,
                           after_tool=after_tool)
         prompt = task['confirmed_task'] + (f'\nStarting website: {task["website"]}' if task.get('website') else '')

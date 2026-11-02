@@ -96,4 +96,6 @@ The agent keeps its own variables between steps, sees the page as screenshots, a
 uv run pytest   # real headless Chrome, scripted model, no provider calls
 ```
 
+Experimental: `uv sync --extra monty`, then `build_agent(backend='monty', workspace=ws)` + `Session(repl=MontyRepl(ws))` runs the agent's code in Pydantic's [Monty](https://github.com/pydantic/monty) sandbox (CodeMode `run_code`) instead of the CPython REPL. Eval option `code_backend: "monty"`.
+
 `eval/` runs the agent on the Browser Use eval platform with the same contract as Browser Use Pi.
