@@ -20,7 +20,7 @@ from pathlib import Path
 
 MAX_IMAGES_PER_CELL = 4
 MAX_IMAGE_SIDE = 2048  # full-page captures exceeded OpenAI's 30k-patch limit (bub2-002)
-CDP_TIMEOUT_S = 30.0
+CDP_TIMEOUT_S = 20.0  # bu-pi cdp timeout; 30s/60s waits made each stall cost more (v1b: 114 Hard timeouts)
 STATE = Path(os.environ.get('BU_STATE_DIR', '.browser-use'))
 images: list[dict] = []
 
@@ -54,8 +54,7 @@ def _install(ns: dict) -> None:
 
     def cdp(method, session_id=None, **params):
         # browser-harness defaults to 5s IPC; heavy cloud pages (Maps, TripAdvisor) blew it on navigate/evaluate/input.
-        default = helpers.SCREENSHOT_IPC_RESPONSE_TIMEOUT_SECONDS if method == 'Page.captureScreenshot' else CDP_TIMEOUT_S
-        params.setdefault('_response_timeout', default)
+        params.setdefault('_response_timeout', CDP_TIMEOUT_S)
         result = raw_cdp(method, session_id, **params)
         # Every screenshot the agent takes is shown to the model as a native image.
         if method == 'Page.captureScreenshot' and isinstance(result, dict) and result.get('data'):
@@ -71,9 +70,12 @@ def _install(ns: dict) -> None:
     shots = STATE / 'screenshots'
 
     def screenshot(full=False):
-        """Capture the current tab and show it to the model. Returns the PNG path."""
+        """Capture the current tab (JPEG q70, like bu-pi) and show it to the model. Returns the file path."""
         shots.mkdir(parents=True, exist_ok=True)
-        return helpers.capture_screenshot(str(shots / f'{len(list(shots.iterdir())):04d}.png'), full=full)
+        r = cdp('Page.captureScreenshot', format='jpeg', quality=70, captureBeyondViewport=full)
+        path = shots / f'{len(list(shots.iterdir())):04d}.jpg'
+        path.write_bytes(base64.b64decode(r['data']))
+        return str(path)
 
     def show_image(path):
         """Show an image file (png/jpeg/webp/gif) to the model."""

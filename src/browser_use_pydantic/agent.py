@@ -44,6 +44,8 @@ DELIVERY_REPAIR = (  # bu-pi src/agent.ts:560, verbatim except tool names
 )
 DELIVERY_TOOLS = ['finish_from_repl', 'finish']
 LINK = re.compile(r'\]\(<?([^)\s>]+)>?\)')  # markdown link targets
+PARTIAL = re.compile(r'\b(partial(ly)?|incomplete|not (fully |yet |individually )?(verified|checked|opened|covered)|subset|sample of|'
+                     r'first page only|only \d+ of|remaining \d+|did not (check|cover|open|verify|reach))\b', re.I)
 FILE = re.compile(r'`([\w./-]+\.(?:md|csv|json|jsonl|txt|tsv|xlsx|html|zip|pdf|png|jpe?g))`')  # `basket_brief.md`
 
 
@@ -114,6 +116,7 @@ class Session:
     started: float = field(default_factory=time.monotonic)
     finalizing: bool = False
     checked_delivery: bool = False  # the delivery guard fires once; a second identical finish is accepted
+    checked_partial: bool = False  # the early-partial guard fires once
     messages: list[ModelMessage] = field(default_factory=list)
     after_tool: Callable[[str, dict, dict], Awaitable[None]] | None = None  # observer hook (evals)
 
@@ -141,23 +144,31 @@ async def python(ctx: RunContext[Session], code: str) -> list[Any]:
 
 
 def check_delivery(ctx: RunContext[Session], value: Any) -> None:
-    """One repair for deliveries that are a placeholder or link workspace files that were never written."""
-    if ctx.deps.checked_delivery:
-        return
+    """One-shot repairs: a placeholder or links to unwritten files; a self-declared partial result with budget left."""
+    s = ctx.deps
     text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
-    problem = None
-    if not re.search(r'[^\W_]', text):  # '...', '' (a one-character answer like '7' is fine)
-        problem = f'The result {text[:20]!r} is a placeholder, not the answer.'
-    else:
-        root = ctx.deps.repl.workspace
-        missing = sorted({t for t in LINK.findall(text) + FILE.findall(text) if not re.match(r'^([a-z][\w+.-]*:|#|//)', t, re.I)
-                          and not (root / t.split('#')[0]).exists()})
-        if missing:
-            problem = f'These linked files do not exist in the workspace: {", ".join(missing[:10])}.'
-    if problem:
-        ctx.deps.checked_delivery = True
-        raise ModelRetry(f'{problem} Deliver the actual result: finish_from_repl with the existing records, or finish '
-                         'with the full answer inline. Do not repeat browser actions.')
+    if not s.checked_delivery:
+        problem = None
+        if not re.search(r'[^\W_]', text):  # '...', '' (a one-character answer like '7' is fine)
+            problem = f'The result {text[:20]!r} is a placeholder, not the answer.'
+        else:
+            missing = sorted({t for t in LINK.findall(text) + FILE.findall(text)
+                              if not re.match(r'^([a-z][\w+.-]*:|#|//)', t, re.I)
+                              and not (s.repl.workspace / t.split('#')[0]).exists()})
+            if missing:
+                problem = f'These linked files do not exist in the workspace: {", ".join(missing[:10])}.'
+        if problem:
+            s.checked_delivery = True
+            raise ModelRetry(f'{problem} Deliver the actual result: finish_from_repl with the existing records, or '
+                             'finish with the full answer inline. Do not repeat browser actions.')
+    left = s.timeout_s - (time.monotonic() - s.started)
+    if not s.finalizing and not s.checked_partial and left > 0.4 * s.timeout_s and PARTIAL.search(text):
+        # v1b stopped by choice with most of the budget left (2vxyzx top-5 of 37, bub2-007 40 of 404, bub2-014 at 7%).
+        s.checked_partial = True
+        raise ModelRetry(f'Your result says it is partial, and {left / 60:.0f} of {s.timeout_s / 60:.0f} minutes '
+                         'remain. If coverage is limited by choice, not by a blocker you already tried to get around, '
+                         'continue the missing items now, checkpoint progress, then finish. If a real blocker remains, '
+                         'finish again with the same result.')
 
 
 def _outputs(output_type: Any) -> list[ToolOutput]:
@@ -277,7 +288,7 @@ def build_agent(
         instructions=f'{SYSTEM_PROMPT}\n{instructions}'.strip(),
         tools=[python],
         model_settings=settings,
-        retries={'tools': 1, 'output': 3},
+        retries={'tools': 1, 'output': 5},
         capabilities=[BrowserLoop(), OpenAICompaction(token_threshold=compact_at_tokens)],
     )
 

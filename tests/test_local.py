@@ -261,3 +261,30 @@ async def test_existing_file_link_and_short_answer_pass(browser, tmp_path):
     for answer in ['7', 'See [out.csv](out.csv), `out.csv` and [site](https://example.com)']:
         result, seen = await go(browser, tmp_path, [('finish', {'result': answer})])
         assert (len(seen), result.output) == (1, answer)
+
+
+async def test_partial_result_with_budget_left_gets_one_continue_turn(browser, tmp_path):
+    # v1b quit by choice with most of the budget left (2vxyzx, bub2-007, bub2-014).
+    first = 'Partial: only 5 of 37 listings checked.'
+    model, seen = _choice_recorder([ModelResponse(parts=[ToolCallPart('finish', {'result': first})]),
+                                    ModelResponse(parts=[ToolCallPart('finish', {'result': first})])])
+    agent, session = build_agent(), Session(repl=Repl(tmp_path, browser))
+    try:
+        with agent.override(model=model):
+            result = await run(agent, 'task', session, 'gpt-6-luna')
+    finally:
+        await session.repl.close()
+    retry = [p.content for p in seen[1][0][-1].parts if getattr(p, 'outcome', None) == 'retried']
+    assert retry and 'minutes remain' in retry[0]
+    assert (len(seen), result.output) == (2, first)
+
+
+async def test_screenshot_is_jpeg(browser, tmp_path):
+    # bu-pi parity: JPEG q70; v1b's 60s full-PNG captures timed out on 48 of 280 Hard screenshot() calls.
+    result, seen = await go(browser, tmp_path, [
+        ('python', {'code': "new_tab('data:text/html,<h1>hi</h1>')\nwait_for_load()\np = screenshot()\np"}),
+        ('finish_from_repl', {'expression': 'p'})])
+    out = [p for p in seen[1].parts if isinstance(p, ToolReturnPart)][0].content
+    assert result.status == 'completed', out
+    assert result.output.endswith('.jpg') and Path(result.output).read_bytes()[:2] == b'\xff\xd8'
+    assert any(getattr(c, 'media_type', '') == 'image/jpeg' for c in out)
