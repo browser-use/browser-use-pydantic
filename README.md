@@ -74,7 +74,7 @@ result.status           # completed | max_steps | timeout | error
 result.partial          # last checkpoint(..., partial=True) when unfinished
 ```
 
-- **Ultrafast:** `mode='ultrafast'` prints a compact accessibility-tree state and acts on its ids, waiting only briefly after each action, for interaction-heavy tasks. The REPL gets `bu.state()`, `bu.click(id)` and `bu.type(id, text, enter=False)`, the same helpers as Browser Use Pi's ultrafast mode.
+- **Ultrafast:** `mode='ultrafast'` prints a compact accessibility-tree state and acts on its ids, waiting only briefly after each action, for interaction-heavy tasks.
 
 ## How it works
 

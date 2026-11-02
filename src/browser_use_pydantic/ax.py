@@ -2,11 +2,15 @@
 
 Same names, defaults, waits and printed text as Pi. Differences forced by Python + browser-harness:
 synchronous helpers (no await), keyword options (enter=True, max=30000), and CDP events read from the
-browser-harness daemon's buffer by a background thread instead of an event tap.
+browser-harness daemon's buffer by a background thread instead of an event tap. That buffer is shared by every
+client of one daemon (BU_NAME), so give each ultrafast agent its own daemon: another agent or browser-harness CLI
+on it would miss the dialogs and network events bu reads. Clicks send no mouseMoved (see _click_at): mouseover,
+mouseenter and :hover still fire on press, mousemove handlers do not.
 """
 
 from __future__ import annotations
 
+import ast
 import json
 import math
 import re
@@ -26,8 +30,9 @@ BLOCKS = {'paragraph', 'listitem', 'row', 'LabelText'}
 NATIVE_INPUTS = {'Date', 'DateTime', 'InputTime'}
 CONTEXT_LOSS = re.compile(r'Execution context was destroyed|Cannot find context|Cannot find default execution context|'
                           r'Inspected target navigated|Target closed|No frame')
-CDP_TIMEOUT_MS = 20_000  # Pi page.evaluate bounds execution in Chrome by the connection timeout (20 s)
+CDP_TIMEOUT_MS = 15_000  # Pi page.evaluate bounds execution in Chrome by operationTimeoutMs (default 15 s)
 EVENT_BUFFER = 500  # browser-harness daemon's own event buffer size
+SURROGATE = re.compile('[\ud800-\udfff]')  # lone halves of a cut emoji: Python's utf-8 stdout refuses them
 
 
 def norm(s: Any) -> str:
@@ -41,8 +46,13 @@ def clip(s: str, n: int) -> str:
 
 
 def quote(s: str) -> str:
-    """JSON.stringify of a string."""
-    return json.dumps(s, ensure_ascii=False)
+    """JSON.stringify of a string (it escapes lone surrogates as \\udXXX)."""
+    return SURROGATE.sub(lambda m: f'\\u{ord(m.group()):04x}', json.dumps(s, ensure_ascii=False))
+
+
+def well_formed(s: str) -> str:
+    """What console.log writes: lone surrogates become U+FFFD."""
+    return SURROGATE.sub('\ufffd', s)
 
 
 def val(o: Any) -> Any:
@@ -202,7 +212,21 @@ class AxHelpers:
     def __init__(self, cdp: Callable[..., dict], log: Callable[[str], None] = print):
         from browser_harness import helpers
 
-        self.cdp, self.log, self._ipc = cdp, log, helpers._send
+        def pi_cdp(method: str, session_id: str | None = None, **params: Any) -> dict:
+            try:
+                return cdp(method, session_id, **params)
+            except RuntimeError as e:
+                # The daemon sends CDP's error as str(dict); Pi's cdp.ts: 'CDP -32000: No node with given id found'.
+                err = str(e)
+                try:
+                    err = ast.literal_eval(err) if err.startswith('{') else err
+                except (ValueError, SyntaxError):
+                    pass
+                if isinstance(err, dict) and 'code' in err:
+                    raise RuntimeError(f'CDP {err["code"]}: {err.get("message")}') from None
+                raise
+
+        self.cdp, self.log, self._ipc = pi_cdp, log, helpers._send
         self.inflight: dict[str, dict[str, float]] = {}
         self.last_net: dict[str, float] = {}
         self.dialogs: list[str] = []
@@ -525,7 +549,7 @@ class AxHelpers:
             tail = fit(lines[::-1], max * 0.2)
             body = [*lines[:head], f'... {len(lines) - head - tail} lines cut here (bu.state(max=30000) or js(...))',
                     *lines[len(lines) - tail:]]
-        out = f'{header}\n' + '\n'.join(body) + '\n[/state]'
+        out = well_formed(f'{header}\n' + '\n'.join(body) + '\n[/state]')
         self.log(out)
         return Printed(out)
 
@@ -620,10 +644,11 @@ class AxHelpers:
         try:
             detail = body()
         except Exception as e:
-            raise RuntimeError(f'{op} {self._describe(id)} failed: {e}') from None
+            raise RuntimeError(well_formed(f'{op} {self._describe(id)} failed: {e}')) from None
         self.acted_at = now()
         settled = self.settle()
-        line = f'[ok] {op} {self._describe(id)}{detail} -> {self._change(before, settled.get("probe"))}{self._flush_dialogs()}'
+        line = well_formed(f'[ok] {op} {self._describe(id)}{detail} -> {self._change(before, settled.get("probe"))}'
+                           f'{self._flush_dialogs()}')
         self.log(line)
         return Printed(line)
 

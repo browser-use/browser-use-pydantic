@@ -74,11 +74,14 @@ class Repl:
         self.state.mkdir(parents=True, exist_ok=True)
         parent, child = socket.socketpair()
         log = open(self.state / 'worker.log', 'ab')
+        env = {**os.environ, 'BH_TAB_MARKER': '0', **self.env, 'BU_STATE_DIR': str(self.state)}
+        env.pop('BU_MODE', None)  # only self.mode picks the worker's mode, never a leftover shell variable
+        if self.mode == 'ultrafast':
+            env['BU_MODE'] = 'ultrafast'
         self.proc = await asyncio.create_subprocess_exec(
             sys.executable, '-m', 'browser_use_pydantic.worker', str(child.fileno()),
             cwd=self.workspace, pass_fds=[child.fileno()], stdin=asyncio.subprocess.DEVNULL,
-            stdout=log, stderr=log, env={**os.environ, 'BH_TAB_MARKER': '0', **self.env, 'BU_STATE_DIR': str(self.state),
-                                         **({'BU_MODE': 'ultrafast'} if self.mode == 'ultrafast' else {})},
+            stdout=log, stderr=log, env=env,
         )
         child.close()
         log.close()

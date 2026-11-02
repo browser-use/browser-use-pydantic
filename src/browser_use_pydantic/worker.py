@@ -104,6 +104,12 @@ def _install(ns: dict) -> ax.AxHelpers | None:
         return None
     bu = ns['bu'] = ax.AxHelpers(cdp)
     helpers.drain_events = ns['drain_events'] = bu.drain_events  # bu reads the daemon's events; the agent still gets them
+
+    def print_(*args, **kwargs):
+        """print() for the cell: a bu result is already printed, so it prints empty (Pi: console.log of it)."""
+        print(*('' if isinstance(a, ax.Printed) else a for a in args), **kwargs)
+
+    ns['print'] = print_
     return bu
 
 

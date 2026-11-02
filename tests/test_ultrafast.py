@@ -52,6 +52,10 @@ PAGES = {
 <iframe src="/inner" style="border:0;padding:10px"></iframe>
 <label class=up>Upload CV<input type=file name=cv style="display:none"></label>''',
     '/inner': '''<title>Inner</title><button onclick="this.textContent = 'Inner done'">Inner button</button>''',
+    # A lone surrogate, as left by text cut in the middle of an emoji.
+    '/emoji': r'''<title>Emoji</title><input aria-label="Note">
+<button onclick="document.getElementById('out').textContent = 'Tweet text \ud83d'; document.querySelector('input').value = 'x\ud83d'">Cut</button>
+<p id=out></p>''',
     '/long': '<title>Long</title>' + ''.join(f'<button>Item number {i}</button>' for i in range(60)),
 }
 
@@ -169,7 +173,8 @@ def test_default_prompt_unchanged():
     assert build_agent(mode='ultrafast').model_settings == build_agent().model_settings
 
 
-async def test_default_worker_has_no_bu(daemon, tmp_path):
+async def test_default_worker_has_no_bu(daemon, tmp_path, monkeypatch):
+    monkeypatch.setenv('BU_MODE', 'ultrafast')  # a leftover shell variable must not switch the mode
     r = Repl(tmp_path, daemon)
     try:
         out, err = await cell(r, "print('bu' in globals(), drain_events.__module__, os.environ.get('BU_MODE'))")
@@ -204,6 +209,9 @@ Pick a city and a date.
     # Returned text equals the print; the REPL does not echo it a second time.
     out, err = await cell(repl, "s = bu.state(); print(type(s).__name__, s.startswith('[state] Demo'), s.endswith('[/state]'))")
     assert out.count('[state]') == 1 and out.strip().endswith('Printed True True')
+    # Pi: console.log(await bu.state()) prints an empty line, not the state again.
+    out, err = await cell(repl, "print(bu.state()); print('x', bu.state(), 'y')")
+    assert err is None and out.count('[state]') == 2 and '[/state]\n\n[state]' in out and out.endswith('[/state]\nx  y\n'), out
 
 
 async def test_state_marks_new_ids_and_truncates(repl, site):
@@ -284,8 +292,20 @@ async def test_no_change_and_failures(repl, site):
                                 "n = cdp('DOM.querySelector', nodeId=root, selector='button[style*=none]')['nodeId']\n"
                                 "bu.click(cdp('DOM.describeNode', nodeId=n)['node']['backendNodeId'])")
     assert re.search(r'click \[\d+\] failed: Error: Target hidden', err), err
+    out, err = await cell(repl, "bu.click(999999)")  # a stale id: CDP's error, worded like Pi's cdp.ts
+    assert 'RuntimeError: click [999999] failed: CDP -32000: No node with given id found' in err, err
     out, err = await cell(repl, "bu.click(idof('Noop'))")  # focus moves, the DOM does not change
     assert err is None and re.match(r'\[ok\] click \[\d+\] button "Noop" -> no change\n', out), out
+
+
+async def test_lone_surrogate_prints_like_pi(repl, site):
+    # Pi: console.log writes U+FFFD for a lone surrogate, JSON.stringify escapes it in values.
+    await cell(repl, f"new_tab('{site}/emoji'); s = bu.state()" + IDOF)
+    out, err = await cell(repl, "bu.click(idof('Cut'))")
+    assert err is None, err
+    assert 'Tweet text \ufffd' in out and 'textbox "Note" = "x\\ud83d"' in out, out
+    out, err = await cell(repl, "s = bu.state(); print('\\ud83d' in s)")
+    assert err is None and out.endswith('[/state]\nFalse\n'), out
 
 
 async def test_settle_waits_for_requests(repl, site):
