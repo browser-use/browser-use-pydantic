@@ -266,20 +266,35 @@ def _prune_images(messages: list[ModelMessage]) -> list[ModelMessage] | None:
     return out if changed else None
 
 
+def model_ref(llm: Any) -> Any:
+    """'openai/gpt-5.6-luna' (bu-pi style) -> 'openai-responses:gpt-5.6-luna'. Pydantic AI strings and models pass through."""
+    if not isinstance(llm, str) or ':' in llm or '/' not in llm:
+        return llm
+    provider, name = llm.split('/', 1)
+    return f'{"openai-responses" if provider == "openai" else provider}:{name}'
+
+
 def build_agent(
-    model: str = 'openai-responses:gpt-6-luna',
+    model: Any = 'openai-responses:gpt-6-luna',
     *,
     output_type: Any = str,
     reasoning_effort: str = 'medium',
     instructions: str = '',
     compact_at_tokens: int = 150_000,
 ) -> Agent[Session, Any]:
-    settings: OpenAIResponsesModelSettings = {
-        'openai_reasoning_effort': reasoning_effort,
-        'openai_reasoning_summary': 'auto',
-        'openai_reasoning_context': 'auto',  # bu-pi sends no context; Pydantic AI would send all_turns
-        'max_tokens': 32_768,
-    }
+    model = model_ref(model)
+    openai = not isinstance(model, str) or model.startswith(('openai-responses:', 'openai:'))
+    if openai:  # the evaluated configuration; unchanged
+        settings: OpenAIResponsesModelSettings | dict = {
+            'openai_reasoning_effort': reasoning_effort,
+            'openai_reasoning_summary': 'auto',
+            'openai_reasoning_context': 'auto',  # bu-pi sends no context; Pydantic AI would send all_turns
+            'max_tokens': 32_768,
+        }
+        capabilities = [BrowserLoop(), OpenAICompaction(token_threshold=compact_at_tokens)]
+    else:  # other providers: unified thinking setting, no server-side compaction
+        settings = {'thinking': reasoning_effort, 'max_tokens': 32_768}
+        capabilities = [BrowserLoop()]
     agent = Agent(
         model,
         deps_type=Session,
@@ -289,7 +304,7 @@ def build_agent(
         tools=[python],
         model_settings=settings,
         retries={'tools': 1, 'output': 5},
-        capabilities=[BrowserLoop(), OpenAICompaction(token_threshold=compact_at_tokens)],
+        capabilities=capabilities,
     )
 
     @agent.instructions
@@ -314,10 +329,25 @@ class RunResult:
     error: str | None
     messages: list[ModelMessage]
 
+    def final_result(self) -> str | None:
+        """browser-use: the answer text, or None when the run did not complete."""
+        return self.text if self.status == 'completed' else None
+
+    @property
+    def structured_output(self) -> Any:
+        return self.output if self.status == 'completed' and not isinstance(self.output, str) else None
+
+    def is_done(self) -> bool:
+        return self.status == 'completed'
+
 
 def usage_and_cost(messages: list[ModelMessage], model_ref: str) -> tuple[dict[str, int], float]:
     total = {'input': 0, 'output': 0, 'cache_read': 0, 'requests': 0}
     cost = 0.0
+    provider = 'openai'
+    if ':' in model_ref:  # 'anthropic:claude-...'; the eval passes a bare OpenAI name
+        provider, model_ref = model_ref.split(':', 1)
+        provider = provider.removesuffix('-responses')
     for m in messages:
         if isinstance(m, ModelResponse):
             u = m.usage
@@ -328,7 +358,7 @@ def usage_and_cost(messages: list[ModelMessage], model_ref: str) -> tuple[dict[s
             try:
                 cost += float(calc_price(Usage(input_tokens=u.input_tokens, output_tokens=u.output_tokens,
                                                cache_read_tokens=u.cache_read_tokens),
-                                         model_ref=model_ref, provider_id='openai').total_price)
+                                         model_ref=model_ref, provider_id=provider).total_price)
             except Exception:  # noqa: BLE001 - unknown price: report tokens, cost stays partial
                 pass
     return total, cost
@@ -343,12 +373,15 @@ def last_text(messages: list[ModelMessage]) -> str:
     return ''
 
 
-async def run(agent: Agent[Session, Any], task: str, session: Session, model_ref: str) -> RunResult:
-    """Run one task with graceful budgets. Never raises for agent/provider failures."""
+async def run(agent: Agent[Session, Any], task: str, session: Session, model_ref: str,
+              message_history: list[ModelMessage] | None = None) -> RunResult:
+    """Run one task with graceful budgets. Never raises for agent/provider failures.
+
+    message_history continues an earlier transcript (follow-up task)."""
     status, output, error = 'completed', None, None
     try:
         async with asyncio.timeout(session.timeout_s):
-            result = await agent.run(task, deps=session,
+            result = await agent.run(task, deps=session, message_history=message_history,
                                      usage_limits=UsageLimits(request_limit=session.max_steps))
         output, messages = result.output, result.all_messages()
     except TimeoutError:

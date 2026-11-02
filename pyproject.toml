@@ -1,13 +1,13 @@
 [project]
 name = "browser-use-pydantic"
 version = "0.1.0"
-description = "Add your description here"
+description = "Browser Use on Pydantic AI: one persistent Python REPL tool on raw CDP"
 authors = [
     { name = "Gregor Žunič", email = "36313686+gregpr07@users.noreply.github.com" }
 ]
 requires-python = ">=3.12"
 dependencies = [
-    "browser-harness",
+    "browser-harness>=0.1.13",
     "pydantic-ai-slim[openai]>=2.64.0",
 ]
 
