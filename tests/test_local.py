@@ -339,6 +339,18 @@ async def test_monty_screenshot_state_and_finish_from_repl(browser, tmp_path):
                                                                              ('run_code', 0, None)]
 
 
+async def test_monty_tuple_keyed_values_are_output_not_a_crash(browser, tmp_path):
+    """5 eval runs died on `Counter((a, b) ...)` as the last expression: json.dumps rejects tuple keys (bub2-018)."""
+    result, seen = await go_monty(browser, tmp_path, [
+        ('run_code', {'code': 'from collections import Counter\nc = Counter((a, b) for a, b in [(1, 2), (1, 2)])\nc'}),
+        ('finish_from_repl', {'expression': 'c'}),
+        ('finish', {'result': 'done'}),
+    ])
+    assert result.status == 'completed' and result.output == 'done', result.error
+    assert _ret(seen[1])[0] == '{(1, 2): 2}'  # shown like the CPython worker shows it
+    assert 'TypeError' in str(_ret(seen[2]))  # undeliverable value -> error for the model, run continues
+
+
 async def test_monty_cell_timeout_resets_sandbox_keeps_files(browser, tmp_path):
     observed = []
     result, seen = await go_monty(browser, tmp_path, [
@@ -353,7 +365,7 @@ async def test_monty_cell_timeout_resets_sandbox_keeps_files(browser, tmp_path):
     assert result.output == 'done'
     timed_out = _ret(seen[1])[0]
     assert 'timed out after 3s' in timed_out and observed[0][2]['error']
-    assert _ret(seen[2])[0] == '[false, [1, 2]]'
+    assert _ret(seen[2])[0] == '[False, [1, 2]]'  # repr, as the CPython worker shows it
     assert 'ValueError: boom' in _ret(seen[3])[0] and observed[2][2]['error']
     assert _ret(seen[4])[0] in ('data:', 'about')
     assert json.loads((tmp_path / '.browser-use' / 'partial.json').read_text())['value'] == [1, 2]
@@ -427,7 +439,7 @@ async def test_monty_parallel_calls_serialized_and_restart_keeps_helpers(browser
         result = await run(agent, 'task', session, 'gpt-6-luna')
     returns = [p.content[0] for m in result.messages for p in getattr(m, 'parts', []) if isinstance(p, ToolReturnPart)
                and p.tool_name == 'run_code']
-    assert returns[2:] == ['3', '[false, true]'], returns
+    assert returns[2:] == ['3', '[False, True]'], returns
     assert (result.status, result.output, result.error) == ('completed', 'false', None)
 
 
