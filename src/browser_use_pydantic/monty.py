@@ -16,6 +16,7 @@ import asyncio
 import base64
 import json
 import os
+import pprint
 import threading
 from pathlib import Path
 from typing import Any
@@ -215,7 +216,7 @@ def _render(value: Any) -> str:
         return ''
     if isinstance(value, str):
         return value
-    return json.dumps(value, ensure_ascii=False, default=str)
+    return pprint.pformat(value, width=120, sort_dicts=False)  # as worker._display: any value, e.g. tuple dict keys
 
 
 async def evaluate(ctx: RunContext[Any], expression: str, timeout: float) -> dict[str, Any]:
@@ -231,8 +232,11 @@ async def evaluate(ctx: RunContext[Any], expression: str, timeout: float) -> dic
     value = r.return_value if isinstance(r, ToolReturn) else r
     if isinstance(value, dict) and set(value) == {'output', 'result'}:  # the expression printed; deliver its value
         value = value['result']
-    return {'value': value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str),
-            'error': None}
+    try:  # same encoding as the worker's eval; a value JSON can't encode is an error for the model, not a crash
+        return {'value': value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str),
+                'error': None}
+    except (TypeError, ValueError) as e:
+        return {'value': None, 'error': f'{type(e).__name__}: {e}'}
 
 
 class MontyCell(AbstractCapability[Any]):
@@ -259,6 +263,8 @@ class MontyCell(AbstractCapability[Any]):
             # CodeMode reset the session on cancel. A helper already running in its thread finishes on its own
             # (bounded by its IPC timeout); printed output of the cell is not recoverable.
             error = TIMED_OUT.format(s.cell_timeout_s)
+        except Exception as e:  # noqa: BLE001 - as in the worker, every failure is cell output, never the end of the run
+            error = f'{type(e).__name__}: {e}'
         text = '\n'.join([text or '', *repl.notes]).strip('\n')
         cells = repl.state / 'cells'
         cells.mkdir(parents=True, exist_ok=True)
