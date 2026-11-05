@@ -457,3 +457,35 @@ async def test_monty_prompt_ax_recipe_runs_unchanged(browser, tmp_path):
     result, seen = await go_monty(browser, tmp_path, [('run_code', {'code': code}), ('finish', {'result': 'ok'})])
     out = _ret(seen[1])[0]
     assert json.loads(out)['title'] == 'clicked', out
+
+
+async def test_monty_screenshot_is_jpeg(browser, tmp_path):
+    # Same capture as the worker since main's bu-pi parity change: JPEG q70 at 20s, .jpg on disk.
+    result, seen = await go_monty(browser, tmp_path, [
+        ('run_code', {'code': "new_tab('data:text/html,<h1>hi</h1>')\nwait_for_load()\np = screenshot()\np"}),
+        ('finish_from_repl', {'expression': 'p'})])
+    out = _ret(seen[1])
+    assert result.status == 'completed', out
+    assert result.output.endswith('.jpg') and Path(result.output).read_bytes()[:2] == b'\xff\xd8'
+    assert any(getattr(c, 'media_type', '') == 'image/jpeg' for c in out)
+
+
+async def test_monty_remote_upload_sends_bytes(browser, tmp_path):
+    # BU_REMOTE_BROWSER=1 (cloud): local paths mean nothing on the browser host, so upload_file sends bytes, as the worker.
+    (tmp_path / 'cv.txt').write_text('hello cloud')
+    os.utime(tmp_path / 'cv.txt', (1e9, 1e9))  # a path upload keeps this mtime; a bytes upload is stamped now
+    code = ("new_tab('data:text/html,<input type=file id=f>')\nwait_for_load()\n"
+            "n = upload_file('#f', 'cv.txt')\n"
+            "[n, js(\"(f => f.name + ':' + f.size + ':' + (f.lastModified > 1.5e12))(document.getElementById('f').files[0])\")]")
+    for env, want in [({**browser, 'BU_REMOTE_BROWSER': '1'}, "[1, 'cv.txt:11:true']"),
+                      (browser, "[None, 'cv.txt:11:false']")]:  # local: browser-harness's path upload
+        result, seen = await go_monty(env, tmp_path, [('run_code', {'code': code}), ('finish', {'result': 'ok'})])
+        assert _ret(seen[1])[0] == want, _ret(seen[1])
+
+
+def test_monty_rejects_ultrafast(tmp_path):
+    MontyRepl = _monty()
+    with pytest.raises(ValueError, match='not implemented for the Monty backend'):
+        build_agent(backend='monty', workspace=tmp_path, mode='ultrafast')
+    with pytest.raises(ValueError, match='not implemented for the Monty backend'):
+        MontyRepl(tmp_path, mode='ultrafast')

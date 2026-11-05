@@ -331,6 +331,8 @@ def build_agent(
 
         if workspace is None:
             raise ValueError("backend='monty' needs workspace= (mounted read-write into the sandbox)")
+        if mode != 'default':
+            raise ValueError("mode='ultrafast' is not implemented for the Monty backend")
         prompt, tools, extra = MONTY_SYSTEM_PROMPT, monty_toolset_tools(), [MontyCell(), code_mode(workspace)]
     elif backend != 'repl':
         raise ValueError(f'Unknown backend {backend!r}')

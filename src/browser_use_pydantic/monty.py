@@ -27,13 +27,13 @@ from pydantic_ai.exceptions import ToolRetryError
 from pydantic_ai_harness import CodeMode
 from pydantic_monty import NOT_HANDLED, MountDir, OSAccess
 
-from .worker import CDP_TIMEOUT_S, MAX_IMAGES_PER_CELL, fit_image
+from .worker import CDP_TIMEOUT_S, MAX_IMAGES_PER_CELL, _remote_upload, fit_image
 
 CELL_TIMEOUT_S = 120  # Monty's own per-snippet compute and sleep allowance; wall clock is Session.cell_timeout_s
 HELPERS = ('new_tab', 'goto_url', 'wait_for_load', 'page_info', 'list_tabs', 'current_tab', 'switch_tab', 'close_tab',
            'ensure_real_tab', 'js', 'cdp', 'click_at_xy', 'type_text', 'press_key', 'scroll', 'wait_for_element',
            'wait_for_network_idle', 'upload_file', 'http_get', 'drain_events', 'iframe_target', 'wait', 'fill_input',
-           'dispatch_key')
+           'dispatch_key', 'activate_tab')
 LOCAL = ('screenshot', 'show_image', 'checkpoint')
 # Defines the helpers once per sandbox session (again after a reset); see _prime. The imports mirror the worker
 # namespace, where `from browser_harness.helpers import *` also brings json, math, os, time, base64 and Path.
@@ -49,7 +49,7 @@ _installed = threading.Lock()
 
 
 def _install_cdp_wrapper() -> None:
-    """Same wrapper as worker.py: 30s default IPC timeout, and screenshots taken by a helper call reach the model.
+    """Same wrapper as worker.py: 20s default IPC timeout, and screenshots taken by a helper call reach the model.
 
     In-process, so screenshots are only captured on threads running a helper for a MontyRepl (not the eval observer)."""
     from browser_harness import helpers
@@ -60,8 +60,7 @@ def _install_cdp_wrapper() -> None:
         raw_cdp = helpers.cdp
 
         def cdp(method, session_id=None, **params):
-            default = helpers.SCREENSHOT_IPC_RESPONSE_TIMEOUT_SECONDS if method == 'Page.captureScreenshot' else CDP_TIMEOUT_S
-            params.setdefault('_response_timeout', default)
+            params.setdefault('_response_timeout', CDP_TIMEOUT_S)
             result = raw_cdp(method, session_id, **params)
             repl = getattr(_local, 'repl', None)
             if repl is not None and method == 'Page.captureScreenshot' and isinstance(result, dict) and result.get('data'):
@@ -87,8 +86,12 @@ class MontyRepl:
     """Monty counterpart of agent.Repl: workspace/state paths and per-cell host state. The sandbox REPL itself lives
     in CodeMode's per-run session; nothing to start or kill."""
 
-    def __init__(self, workspace: Path, env: dict[str, str] | None = None):
-        self.workspace, self.env, self.n = workspace, env or {}, 0
+    def __init__(self, workspace: Path, env: dict[str, str] | None = None, mode: str | None = 'default'):
+        from .agent import check_mode
+
+        if check_mode(mode) != 'default':
+            raise ValueError("mode='ultrafast' is not implemented for the Monty backend")
+        self.workspace, self.env, self.n, self.mode = workspace, env or {}, 0, 'default'
         self.state = workspace / '.browser-use'
         self.images: list[dict] = []
         self.notes: list[str] = []
@@ -132,6 +135,8 @@ class MontyRepl:
                     args[1] = str(self.path(args[1])) if isinstance(args[1], str) else [str(self.path(p)) for p in args[1]]
                 elif 'path' in kwargs:
                     kwargs = {**kwargs, 'path': str(self.path(kwargs['path']))}
+            if helper == 'upload_file' and self.env.get('BU_REMOTE_BROWSER') == '1':
+                return _remote_upload(helpers.js)(*args, **kwargs)  # as the worker: local paths -> bytes
             return getattr(helpers, helper)(*args, **kwargs)
         finally:
             _local.repl = None
@@ -142,7 +147,10 @@ class MontyRepl:
 
         shots = self.state / 'screenshots'
         shots.mkdir(parents=True, exist_ok=True)
-        return helpers.capture_screenshot(str(shots / f'{len(list(shots.iterdir())):04d}.png'), full=full)
+        r = helpers.cdp('Page.captureScreenshot', format='jpeg', quality=70, captureBeyondViewport=full)  # as worker
+        path = shots / f'{len(list(shots.iterdir())):04d}.jpg'
+        path.write_bytes(base64.b64decode(r['data']))
+        return str(path)
 
     def show_image(self, path):
         p = self.path(path)
