@@ -1,5 +1,10 @@
 <img src="https://raw.githubusercontent.com/browser-use/browser-use-pydantic/main/docs/banner.webp" alt="A crystal above a sea of clouds" width="100%" />
 
+> [!IMPORTANT]
+> **This project is now [browser-use 1.0](https://github.com/browser-use/browser-use).** The same agent (Pydantic AI, one Python REPL, raw CDP) is maintained there. Install `browser-use`, not `browser-use-pydantic`:
+> `uv add browser-use` (or `pip install browser-use`), then `from browser_use import Agent` and `Agent(task).run_sync()`.
+> Ultrafast mode is `Agent(task, mode='ultrafast')`, the default on the `bu-fast` model. New defaults: the model is `bu-fast` (one `BROWSER_USE_API_KEY`) and `Browser()` is a cloud browser; your own Chrome is `Browser('chrome')`. See [MIGRATING.md](https://github.com/browser-use/browser-use/blob/main/MIGRATING.md).
+
 # Browser Use Pydantic
 
 **Browser Use, built on Pydantic AI. In Python.**
@@ -17,14 +22,13 @@ The programmability of [Browser Harness](https://github.com/browser-use/browser-
 ## Start
 
 ```sh
-uv add browser-use-pydantic
-export OPENAI_API_KEY=...
-export BROWSER_USE_API_KEY=...   # for cloud browsers
+uv add browser-use
+export BROWSER_USE_API_KEY=...   # the default model (bu-fast) and cloud browsers
 ```
 
 ```python
 import asyncio
-from browser_use_pydantic import Agent, Browser
+from browser_use import Agent, Browser
 
 async def main():
     async with Agent('Find the top story on Hacker News', browser=Browser(use_cloud=True)) as agent:
@@ -36,6 +40,8 @@ async def main():
 
 asyncio.run(main())
 ```
+
+The sections below document `browser-use-pydantic` 0.3.0, the last release of this package. Current docs: the [browser-use README](https://github.com/browser-use/browser-use#readme).
 
 ## Cloud browsers
 
